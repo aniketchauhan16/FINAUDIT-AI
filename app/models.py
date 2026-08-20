@@ -24,13 +24,14 @@ class MatchStatus(str, Enum):
 
 class Transaction(BaseModel):
     transaction_id: str
+    vendor_name: str
     date:date
     description: str
     amount: Decimal
     currency: str = "USD"
     category: TransactionCategory = TransactionCategory.unknown
 
-    @field_validator("transaction_id", "description", "currency")
+    @field_validator("transaction_id", "vendor_name", "description", "currency")
     @classmethod
     def strip_text(cls,value: str) -> str:
         return value.strip() 
