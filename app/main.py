@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from app.agents.graph import reconciliation_graph
-from app.models import Invoice, MatchResult, Transaction
+from app.models import Invoice, MatchResult, MatchStatus, Transaction
 from app.database import load_invoices, load_transactions
 
 
@@ -24,6 +24,7 @@ def get_transactions() -> list[Transaction]:
 def get_invoices() -> list[Invoice]:
     return load_invoices()
 
+
 @app.post("/run-reconciliation", response_model=list[MatchResult])
 def run_reconciliation() -> list[MatchResult]:
     invoices = load_invoices()
@@ -43,3 +44,14 @@ def run_reconciliation() -> list[MatchResult]:
         results.append(final_state["match_result"])
 
     return results
+
+
+@app.get("/transactions/flagged", response_model=list[MatchResult])
+def get_flagged_transactions() -> list[MatchResult]:
+    results = run_reconciliation()
+
+    return [
+        result
+        for result in results
+        if result.status in {MatchStatus.flagged, MatchStatus.unmatched}
+    ]
