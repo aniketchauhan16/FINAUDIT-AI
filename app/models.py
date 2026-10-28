@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional
 from enum import Enum
@@ -21,6 +21,11 @@ class MatchStatus(str, Enum):
     approved = "approved"
     rejected = "rejected"
     unmatched = "unmatched"
+
+class ReviewStatus(str, Enum):
+    pending_review = "pending_review"
+    approved = "approved"
+    rejected = "rejected"
 
 class Transaction(BaseModel):
     transaction_id: str
@@ -67,4 +72,6 @@ class MatchResult(BaseModel):
     confidence_score: float = Field(ge=0.0, le=1.0)
     amount_difference: Optional[Decimal] = None
     reason: str
-
+    review_status: ReviewStatus = ReviewStatus.pending_review
+    reviewed_at: Optional[datetime] = None
+    reviewed_by: Optional[str] = None
