@@ -7,3 +7,4 @@ class ReconciliationState(TypedDict):
     transaction: Transaction
     invoices: list[Invoice]
     match_result: MatchResult | None
+    reconciliation_path: str
