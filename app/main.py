@@ -2,9 +2,12 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field, field_validator
-from app.agents.graph import reconciliation_graph
-from app.models import Invoice, MatchResult, MatchStatus, ReviewStatus, Transaction
+from pydantic import BaseModel, Field, ValidationError, field_validator
+from app.agents.anomaly_detector import auto_approval_anomalies
+from app.agents.graph import AUTO_DECISION, force_human_review, reconciliation_graph
+from app.agents.matcher import AMOUNT_TOLERANCE, DATE_TOLERANCE_DAYS
+from app.agents.validation import failure_match_result
+from app.models import Anomaly, Invoice, MatchResult, MatchStatus, ReviewStatus, Transaction
 from app.database import (
     get_match_result,
     get_all_match_results,
@@ -92,17 +95,71 @@ def run_reconciliation() -> list[MatchResult]:
     prior_transactions: list[Transaction] = []
 
     for transaction in transactions:
-        final_state = reconciliation_graph.invoke(
-            {
-                "transaction": transaction,
-                "invoices": invoices,
-                "match_result": None,
-                "assigned_invoice_ids": assigned_invoice_ids,
-                "prior_transactions": prior_transactions,
+        try:
+            final_state = reconciliation_graph.invoke(
+                {
+                    "transaction": transaction,
+                    "invoices": invoices,
+                    "match_result": None,
+                    "assigned_invoice_ids": assigned_invoice_ids,
+                    "prior_transactions": prior_transactions,
+                }
+            )
+        except Exception as exc:
+            final_state = {
+                "processing_status": "failed",
+                "decision": "review_required",
+                "reconciliation_path": "flagged",
+                "match_result": failure_match_result(
+                    transaction,
+                    message=f"Graph execution failed ({type(exc).__name__}).",
+                    error_type="processing_error",
+                ),
             }
-        )
 
-        match_result = apply_review_status(final_state["match_result"])
+        raw_result = final_state.get("match_result") if isinstance(final_state, dict) else None
+        try:
+            match_result = MatchResult.model_validate(
+                raw_result.model_dump(mode="python") if isinstance(raw_result, BaseModel) else raw_result
+            )
+        except (ValidationError, TypeError, ValueError):
+            match_result = failure_match_result(
+                transaction,
+                message="Graph execution returned an incomplete match result.",
+                error_type="processing_error",
+            )
+        if match_result is None:
+            raise HTTPException(status_code=500, detail="Reconciliation could not produce a reviewable result.")
+
+        if match_result.status == MatchStatus.auto_approved:
+            safety_check_failed = False
+            try:
+                unsafe_evidence = auto_approval_anomalies(
+                    transaction,
+                    invoices,
+                    match_result,
+                    assigned_invoice_ids,
+                    prior_transactions,
+                    amount_tolerance=AMOUNT_TOLERANCE,
+                    date_tolerance_days=DATE_TOLERANCE_DAYS,
+                )
+            except Exception:
+                unsafe_evidence = []
+                safety_check_failed = True
+            is_clean_path = (
+                isinstance(final_state, dict)
+                and final_state.get("processing_status") == "ok"
+                and final_state.get("decision") == AUTO_DECISION
+                and final_state.get("reconciliation_path") == "clean"
+            )
+            if not is_clean_path or safety_check_failed or unsafe_evidence or match_result.anomalies:
+                match_result = force_human_review(
+                    match_result,
+                    "The API blocked automatic approval because the graph did not pass every safety check.",
+                    [item for item in unsafe_evidence if isinstance(item, Anomaly)],
+                )
+
+        match_result = apply_review_status(match_result)
         results.append(match_result)
         if match_result.invoice_id:
             assigned_invoice_ids.add(match_result.invoice_id)

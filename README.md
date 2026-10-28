@@ -22,10 +22,12 @@ operator view; FastAPI remains the source of reconciliation logic and data.
 flowchart LR
     TX[Transactions CSV] --> API[FastAPI]
     INV[Invoices CSV] --> API
-    API --> CLASSIFY[Classifier node]
+    API --> VALIDATE[Graph input validation]
+    VALIDATE --> CLASSIFY[Classifier node]
     CLASSIFY --> MATCH[Invoice matcher node]
-    MATCH --> ANALYZE[Evidence and anomaly checks]
-    ANALYZE --> ROUTE{Safe clean match?}
+    MATCH --> ANALYZE[Anomaly analysis]
+    ANALYZE --> DECIDE[Decision node]
+    DECIDE --> ROUTE{Safe clean match?}
     ROUTE -->|Yes| CLEAN[Auto-approved]
     ROUTE -->|No| REVIEW[Flagged or unmatched]
     CLEAN --> DB[(SQLite)]
@@ -185,6 +187,15 @@ anomaly columns. Existing rows and review decisions receive legacy defaults
 and remain intact. Existing CSV files stay backward-compatible. Partial
 payments and split settlements are not supported in this phase.
 
+The LangGraph workflow validates input, classifies the transaction, matches an
+invoice, analyzes result consistency and anomalies, decides whether it is
+eligible for auto-approval, and routes to the clean or review path. Validation,
+classification, matching, analysis, and decision failures fail closed. A clean
+route requires a unique invoice, matching vendor/currency/date evidence, an
+amount within tolerance, no anomaly warnings, and a second safety check in the
+API before system approval. Incomplete results are kept for human review when a
+valid transaction identifier is available.
+
 ## Tests
 
 Run the backend test suite from the project root:
@@ -197,4 +208,5 @@ Tests use synthetic fixtures and temporary databases. They cover exact
 references, vendor normalization, amount/date/currency comparisons, zero and
 negative amounts, ambiguous and duplicate invoices, potential duplicate
 payments, CSV row errors, one-to-one assignment, confidence scoring, additive
-migration, review persistence across reruns, and all original backend tests.
+migration, review persistence across reruns, fail-closed graph exceptions,
+ambiguous/duplicate routing, and all original backend tests.

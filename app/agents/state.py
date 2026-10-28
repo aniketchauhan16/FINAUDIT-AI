@@ -1,13 +1,17 @@
 from typing import TypedDict
-from typing_extensions import NotRequired
 
 from app.models import Invoice, MatchResult, Transaction
 
 
-class ReconciliationState(TypedDict):
-    transaction: Transaction
-    invoices: list[Invoice]
-    match_result: MatchResult | None
+class ReconciliationState(TypedDict, total=False):
+    transaction: Transaction | dict | None
+    invoices: list[Invoice] | list[dict]
+    match_result: MatchResult | dict | None
     reconciliation_path: str
-    assigned_invoice_ids: NotRequired[set[str]]
-    prior_transactions: NotRequired[list[Transaction]]
+    assigned_invoice_ids: set[str]
+    prior_transactions: list[Transaction]
+    processing_status: str
+    processing_error: str | None
+    processing_stage: str
+    validation_errors: list[str]
+    decision: str
