@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+import sqlite3
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, ValidationError, field_validator
@@ -7,11 +8,12 @@ from app.agents.anomaly_detector import auto_approval_anomalies
 from app.agents.graph import AUTO_DECISION, force_human_review, reconciliation_graph
 from app.agents.matcher import AMOUNT_TOLERANCE, DATE_TOLERANCE_DAYS
 from app.agents.validation import failure_match_result
-from app.models import Anomaly, Invoice, MatchResult, MatchStatus, ReviewStatus, Transaction
+from app.models import Anomaly, Invoice, MatchResult, MatchStatus, ReviewEvent, ReviewStatus, Transaction
 from app.database import (
     get_match_result,
     get_all_match_results,
     get_pending_review_results,
+    get_review_history as get_transaction_review_history,
     init_db,
     load_invoices_report,
     load_transactions_report,
@@ -37,6 +39,7 @@ app = FastAPI(
 
 class ReviewAction(BaseModel):
     reviewed_by: str = Field(min_length=1, max_length=120)
+    reason: str | None = Field(default=None, max_length=1000)
 
     @field_validator("reviewed_by")
     @classmethod
@@ -45,6 +48,14 @@ class ReviewAction(BaseModel):
         if not value:
             raise ValueError("reviewed_by must not be blank")
         return value
+
+    @field_validator("reason")
+    @classmethod
+    def normalize_reason(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
 
 
 @app.get("/health")
@@ -173,6 +184,14 @@ def get_flagged_transactions() -> list[MatchResult]:
     return get_pending_review_results()
 
 
+@app.get("/transactions/{transaction_id}/review-history", response_model=list[ReviewEvent])
+def get_review_history(transaction_id: str) -> list[ReviewEvent]:
+    events = get_transaction_review_history(transaction_id)
+    if events is None:
+        raise HTTPException(status_code=404, detail="Reconciliation result not found.")
+    return events
+
+
 @app.get("/reconciliation-results", response_model=list[MatchResult])
 def get_reconciliation_results() -> list[MatchResult]:
     return get_all_match_results()
@@ -200,12 +219,18 @@ def review_transaction(
             decision,
             reviewer,
             datetime.now(timezone.utc).isoformat(),
+            action.reason,
         )
     except ReviewNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Reconciliation result not found.") from exc
     except ReviewConflictError as exc:
         raise HTTPException(
             status_code=409, detail="Reconciliation result is not pending review."
+        ) from exc
+    except sqlite3.Error as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="Review could not be recorded; no changes were saved.",
         ) from exc
 
 

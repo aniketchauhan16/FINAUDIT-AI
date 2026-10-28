@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Optional
+from typing import Literal, Optional
 from enum import Enum
 
 from pydantic import BaseModel, Field, field_validator
@@ -145,3 +145,16 @@ class MatchResult(BaseModel):
     match_outcome: Optional[MatchOutcome] = None
     evidence: dict[str, float] = Field(default_factory=dict)
     anomalies: list[Anomaly] = Field(default_factory=list)
+
+
+class ReviewEvent(BaseModel):
+    event_id: str
+    transaction_id: str
+    action: Literal["approved", "rejected"]
+    reviewed_by: str
+    occurred_at: datetime
+    reason: Optional[str] = None
+    previous_review_status: ReviewStatus
+    new_review_status: ReviewStatus
+    previous_match_status: MatchStatus
+    new_match_status: MatchStatus

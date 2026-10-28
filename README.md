@@ -30,7 +30,7 @@ flowchart LR
     DECIDE --> ROUTE{Safe clean match?}
     ROUTE -->|Yes| CLEAN[Auto-approved]
     ROUTE -->|No| REVIEW[Flagged or unmatched]
-    CLEAN --> DB[(SQLite)]
+    CLEAN --> DB[(SQLite results and review events)]
     REVIEW --> DB
     DB --> API
     API --> DASH[Streamlit dashboard]
@@ -97,9 +97,10 @@ enter a reviewer name before approving or rejecting a pending result.
    A fresh run on the included CSVs currently produces 80 results: 25
    auto-approved and 55 awaiting review. Counts depend on the CSV contents and
    matcher settings.
-3. Open **Review queue**, enter a reviewer name, and approve or reject a record.
+3. Open **Review queue**, enter a reviewer name, optionally add a reason, and approve or reject a record.
 4. The queue refreshes after the action. The result table shows the decision,
    reviewer, and review status.
+5. Open **Review history** and select a transaction to inspect its review events.
 
 The 2% amount tolerance is only one part of the decision. Vendor identity,
 dates, currencies, candidate ambiguity, duplicate invoice assignments, and
@@ -127,12 +128,36 @@ dashboard also includes match outcomes and anomaly evidence.
 | `POST` | `/run-reconciliation` | Run the graph and persist results |
 | `GET` | `/reconciliation-results` | List all saved match results |
 | `GET` | `/transactions/flagged` | List records awaiting review |
+| `GET` | `/transactions/{transaction_id}/review-history` | List a result's human review events in chronological order |
 | `POST` | `/transactions/{transaction_id}/approve` | Approve a pending record |
 | `POST` | `/transactions/{transaction_id}/reject` | Reject a pending record |
 
-Review requests use JSON such as `{"reviewed_by":"Alex Reviewer"}`. Missing
-results return `404`, already reviewed results return `409`, and invalid
-reviewer values return `422`. Reconciliation reruns preserve human decisions.
+Review requests accept JSON such as
+`{"reviewed_by":"Alex Reviewer","reason":"Invoice verified."}`. The reason
+is optional and limited to 1,000 characters. Missing results return `404`,
+already reviewed results return `409`, and invalid reviewer or reason values
+return `422`. Reconciliation reruns preserve human decisions.
+
+## Review history and integrity
+
+SQLite schema version 2 adds a separate `review_events` table. Each human
+approval or rejection records an event ID, transaction ID, action, reviewer
+identifier, UTC timestamp, optional reason, and previous/new review and match
+statuses. The event insert and current result update run in one SQLite
+transaction. If event persistence fails, the decision update rolls back.
+
+Only `pending_review` can transition to `approved` or `rejected`. Repeated or
+conflicting decisions return `409`; reopening a reviewed result is not
+supported. Events are append-only through normal application operations, with
+SQLite triggers rejecting updates and deletes. This is an application-level
+audit history, not tamper-proof storage. Existing review decisions are retained
+by the additive migration, but historical events are not fabricated for
+decisions made before this feature existed.
+
+The dashboard's **Review history** page shows action, reviewer, UTC timestamp,
+reason when supplied, and the status transition for a selected transaction.
+Reviewer names are client-supplied identifiers, not authenticated identities;
+authentication and RBAC are not implemented.
 
 If a CSV contains malformed rows, duplicate identifiers, missing required
 values, invalid dates, non-numeric/non-finite amounts, or an unsupported
@@ -183,9 +208,9 @@ requires review regardless of score.
 
 The SQLite schema is upgraded additively on API startup using
 `PRAGMA user_version`; migration version 1 adds match outcome, evidence, and
-anomaly columns. Existing rows and review decisions receive legacy defaults
-and remain intact. Existing CSV files stay backward-compatible. Partial
-payments and split settlements are not supported in this phase.
+anomaly columns, and version 2 adds review-event history. Existing rows and
+review decisions remain intact. Existing CSV files stay backward-compatible.
+Partial payments and split settlements are not supported in this phase.
 
 The LangGraph workflow validates input, classifies the transaction, matches an
 invoice, analyzes result consistency and anomalies, decides whether it is
@@ -209,4 +234,6 @@ references, vendor normalization, amount/date/currency comparisons, zero and
 negative amounts, ambiguous and duplicate invoices, potential duplicate
 payments, CSV row errors, one-to-one assignment, confidence scoring, additive
 migration, review persistence across reruns, fail-closed graph exceptions,
-ambiguous/duplicate routing, and all original backend tests.
+ambiguous/duplicate routing, review-event migrations and persistence, atomic
+review rollback, review-state conflicts, dashboard history, and all original
+backend tests.

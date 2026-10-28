@@ -70,7 +70,7 @@ with st.sidebar:
         "FastAPI base URL",
         value=os.getenv("FINAUDIT_API_URL", "http://127.0.0.1:8000"),
     ).strip()
-    page = st.radio("Page", ("Overview", "Review queue"))
+    page = st.radio("Page", ("Overview", "Review queue", "Review history"))
     reviewer = st.text_input("Reviewer name", value="")
     reviewer_name = reviewer.strip()
     reviewer_is_valid = 1 <= len(reviewer_name) <= 120
@@ -149,6 +149,11 @@ elif page == "Review queue":
                     if anomaly.get("evidence"):
                         st.caption("Evidence: " + "; ".join(anomaly["evidence"]))
                     st.caption("Recommended action: " + anomaly["recommended_action"])
+                review_reason = st.text_area(
+                    "Reason (optional)",
+                    key=f"review-reason-{item['transaction_id']}",
+                    max_chars=1000,
+                )
                 approve_col, reject_col = st.columns(2)
                 for decision, column in (("approve", approve_col), ("reject", reject_col)):
                     if column.button(
@@ -162,7 +167,7 @@ elif page == "Review queue":
                                 api_base,
                                 f"/transactions/{quote(item['transaction_id'], safe='')}/{decision}",
                                 method="POST",
-                                payload={"reviewed_by": reviewer_name},
+                                payload={"reviewed_by": reviewer_name, "reason": review_reason},
                             )
                             outcome = "approved" if decision == "approve" else "rejected"
                             st.session_state["flash_message"] = (
@@ -171,3 +176,46 @@ elif page == "Review queue":
                             st.rerun()
                         except APIError as exc:
                             st.error(str(exc))
+
+elif page == "Review history":
+    st.subheader("Review history")
+    try:
+        results = api_request(api_base, "/reconciliation-results")
+    except APIError as exc:
+        st.error(str(exc))
+        st.info("Start the API with `python -m uvicorn app.main:app --reload`.")
+    else:
+        transaction_ids = [item["transaction_id"] for item in results]
+        if not transaction_ids:
+            st.info("No reconciliation results are available yet.")
+        else:
+            selected_id = st.selectbox("Transaction", transaction_ids)
+            try:
+                events = api_request(
+                    api_base,
+                    f"/transactions/{quote(selected_id, safe='')}/review-history",
+                )
+            except APIError as exc:
+                st.error(str(exc))
+            else:
+                if not events:
+                    st.info(
+                        "No review events are recorded for this result. Decisions made before "
+                        "review history was introduced are not backfilled."
+                    )
+                else:
+                    st.dataframe(
+                        [
+                            {
+                                "Action": event["action"],
+                                "Reviewer": event["reviewed_by"],
+                                "Timestamp (UTC)": event["occurred_at"],
+                                "Reason": event.get("reason") or "—",
+                                "Previous review status": event["previous_review_status"],
+                                "New review status": event["new_review_status"],
+                            }
+                            for event in events
+                        ],
+                        width="stretch",
+                        hide_index=True,
+                    )

@@ -6,17 +6,18 @@ from contextlib import contextmanager
 from decimal import Decimal
 from pathlib import Path
 from typing import Generic, Iterator, TypeVar
+from uuid import uuid4
 
 from pydantic import ValidationError
 
-from app.models import Anomaly, AnomalySeverity, Invoice, MatchOutcome, MatchResult, MatchStatus, ReviewStatus, Transaction
+from app.models import Anomaly, AnomalySeverity, Invoice, MatchOutcome, MatchResult, MatchStatus, ReviewEvent, ReviewStatus, Transaction
 
 
 DATA_DIR = Path("data")
 TRANSACTIONS_CSV = DATA_DIR / "transactions.csv"
 INVOICES_CSV = DATA_DIR / "invoices.csv"
 DATABASE_PATH = DATA_DIR / "finaudit.db"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 T = TypeVar("T")
 
@@ -264,6 +265,47 @@ def init_db() -> None:
                 connection.execute(
                     f"ALTER TABLE reconciliation_results ADD COLUMN {name} {declaration}"
                 )
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS review_events (
+                event_id TEXT PRIMARY KEY,
+                transaction_id TEXT NOT NULL,
+                action TEXT NOT NULL CHECK(action IN ('approved', 'rejected')),
+                reviewed_by TEXT NOT NULL,
+                occurred_at TEXT NOT NULL,
+                reason TEXT,
+                previous_review_status TEXT NOT NULL,
+                new_review_status TEXT NOT NULL CHECK(new_review_status IN ('approved', 'rejected')),
+                previous_match_status TEXT NOT NULL,
+                new_match_status TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS review_events_by_transaction_time
+            ON review_events(transaction_id, occurred_at, event_id)
+            """
+        )
+        connection.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS review_events_prevent_update
+            BEFORE UPDATE ON review_events
+            BEGIN
+                SELECT RAISE(ABORT, 'review events are append-only');
+            END
+            """
+        )
+        connection.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS review_events_prevent_delete
+            BEFORE DELETE ON review_events
+            BEGIN
+                SELECT RAISE(ABORT, 'review events are append-only');
+            END
+            """
+        )
         version = connection.execute("PRAGMA user_version").fetchone()[0]
         if version < SCHEMA_VERSION:
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -272,9 +314,13 @@ def init_db() -> None:
 def save_match_result(match_result: MatchResult) -> MatchResult:
     init_db()
 
+    preserve_human_review = """
+        reconciliation_results.review_status IN ('approved', 'rejected')
+        AND COALESCE(reconciliation_results.reviewed_by, '') <> 'system'
+    """
     with get_connection() as connection:
         connection.execute(
-            """
+            f"""
             INSERT INTO reconciliation_results (
                 transaction_id,
                 invoice_id,
@@ -292,13 +338,25 @@ def save_match_result(match_result: MatchResult) -> MatchResult:
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(transaction_id) DO UPDATE SET
                 invoice_id = excluded.invoice_id,
-                status = excluded.status,
+                status = CASE
+                    WHEN {preserve_human_review} THEN reconciliation_results.status
+                    ELSE excluded.status
+                END,
                 confidence_score = excluded.confidence_score,
                 amount_difference = excluded.amount_difference,
                 reason = excluded.reason,
-                review_status = excluded.review_status,
-                reviewed_at = excluded.reviewed_at,
-                reviewed_by = excluded.reviewed_by,
+                review_status = CASE
+                    WHEN {preserve_human_review} THEN reconciliation_results.review_status
+                    ELSE excluded.review_status
+                END,
+                reviewed_at = CASE
+                    WHEN {preserve_human_review} THEN reconciliation_results.reviewed_at
+                    ELSE excluded.reviewed_at
+                END,
+                reviewed_by = CASE
+                    WHEN {preserve_human_review} THEN reconciliation_results.reviewed_by
+                    ELSE excluded.reviewed_by
+                END,
                 match_outcome = excluded.match_outcome,
                 evidence_json = excluded.evidence_json,
                 anomalies_json = excluded.anomalies_json
@@ -322,15 +380,16 @@ def save_match_result(match_result: MatchResult) -> MatchResult:
                 json.dumps([item.model_dump(mode="json") for item in match_result.anomalies], sort_keys=True),
             ),
         )
+        row = connection.execute(
+            "SELECT * FROM reconciliation_results WHERE transaction_id = ?",
+            (match_result.transaction_id,),
+        ).fetchone()
 
-    return match_result
+    return row_to_match_result(row)
 
 
 def save_match_results(match_results: list[MatchResult]) -> list[MatchResult]:
-    for match_result in match_results:
-        save_match_result(match_result)
-
-    return match_results
+    return [save_match_result(match_result) for match_result in match_results]
 
 
 def get_match_result(transaction_id: str) -> MatchResult | None:
@@ -390,17 +449,35 @@ class ReviewConflictError(Exception):
 
 
 def record_review(
-    transaction_id: str, decision: ReviewStatus, reviewed_by: str, reviewed_at: str
+    transaction_id: str,
+    decision: ReviewStatus,
+    reviewed_by: str,
+    reviewed_at: str,
+    reason: str | None = None,
 ) -> MatchResult:
     """Persist a human decision only while the result is pending review."""
     init_db()
     if decision not in {ReviewStatus.approved, ReviewStatus.rejected}:
         raise ValueError("A review decision must be approved or rejected.")
+    reviewer = reviewed_by.strip()
+    if not reviewer:
+        raise ValueError("A reviewer identifier must not be blank.")
+    normalized_reason = reason.strip() if reason and reason.strip() else None
 
     match_status = (
         MatchStatus.approved if decision == ReviewStatus.approved else MatchStatus.rejected
     )
     with get_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        current = connection.execute(
+            "SELECT * FROM reconciliation_results WHERE transaction_id = ?",
+            (transaction_id,),
+        ).fetchone()
+        if current is None:
+            raise ReviewNotFoundError(transaction_id)
+        if current["review_status"] != ReviewStatus.pending_review.value:
+            raise ReviewConflictError(transaction_id)
+
         cursor = connection.execute(
             """
             UPDATE reconciliation_results
@@ -410,20 +487,36 @@ def record_review(
             (
                 decision.value,
                 reviewed_at,
-                reviewed_by,
+                reviewer,
                 match_status.value,
                 transaction_id,
                 ReviewStatus.pending_review.value,
             ),
         )
         if cursor.rowcount == 0:
-            exists = connection.execute(
-                "SELECT 1 FROM reconciliation_results WHERE transaction_id = ?",
-                (transaction_id,),
-            ).fetchone()
-            if exists is None:
-                raise ReviewNotFoundError(transaction_id)
             raise ReviewConflictError(transaction_id)
+
+        connection.execute(
+            """
+            INSERT INTO review_events (
+                event_id, transaction_id, action, reviewed_by, occurred_at, reason,
+                previous_review_status, new_review_status,
+                previous_match_status, new_match_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(uuid4()),
+                transaction_id,
+                decision.value,
+                reviewer,
+                reviewed_at,
+                normalized_reason,
+                current["review_status"],
+                decision.value,
+                current["status"],
+                match_status.value,
+            ),
+        )
 
         row = connection.execute(
             "SELECT * FROM reconciliation_results WHERE transaction_id = ?",
@@ -431,6 +524,27 @@ def record_review(
         ).fetchone()
 
     return row_to_match_result(row)
+
+
+def get_review_history(transaction_id: str) -> list[ReviewEvent] | None:
+    """Return the append-only human review events, or None if no result exists."""
+    init_db()
+    with get_connection() as connection:
+        result = connection.execute(
+            "SELECT 1 FROM reconciliation_results WHERE transaction_id = ?",
+            (transaction_id,),
+        ).fetchone()
+        if result is None:
+            return None
+        rows = connection.execute(
+            """
+            SELECT * FROM review_events
+            WHERE transaction_id = ?
+            ORDER BY occurred_at ASC, event_id ASC
+            """,
+            (transaction_id,),
+        ).fetchall()
+    return [row_to_review_event(row) for row in rows]
 
 
 def row_to_match_result(row: sqlite3.Row) -> MatchResult:
@@ -451,4 +565,19 @@ def row_to_match_result(row: sqlite3.Row) -> MatchResult:
         evidence=json.loads(row["evidence_json"] or "{}") if "evidence_json" in keys else {},
         anomalies=[Anomaly.model_validate(item) for item in json.loads(row["anomalies_json"] or "[]")]
         if "anomalies_json" in keys else [],
+    )
+
+
+def row_to_review_event(row: sqlite3.Row) -> ReviewEvent:
+    return ReviewEvent(
+        event_id=row["event_id"],
+        transaction_id=row["transaction_id"],
+        action=row["action"],
+        reviewed_by=row["reviewed_by"],
+        occurred_at=row["occurred_at"],
+        reason=row["reason"],
+        previous_review_status=row["previous_review_status"],
+        new_review_status=row["new_review_status"],
+        previous_match_status=row["previous_match_status"],
+        new_match_status=row["new_match_status"],
     )
