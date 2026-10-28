@@ -17,6 +17,7 @@ from evaluation.run_evaluation import (
     validate_invoice_labels,
 )
 from evaluation.review_labels import FIELDS as REVIEW_FIELDS, generate_review_worksheet
+from evaluation.write_report import render_markdown
 from app.agents.validation import failure_match_result
 from app.models import MatchOutcome, MatchResult, MatchStatus, ReviewStatus
 
@@ -212,6 +213,15 @@ class Phase5EvaluationTests(unittest.TestCase):
             self.assertNotIn("predicted_outcome", REVIEW_FIELDS)
             self.assertTrue(all(row["reviewer_status"] == "pending" for row in rows))
             self.assertTrue(all(row["independently_reviewed"] == "no" for row in rows))
+
+    def test_markdown_report_uses_computed_metrics_and_identifies_smoke_cases(self):
+        report = run_evaluation()
+        markdown = render_markdown(report, "test-commit", "2026-10-28")
+        self.assertIn("Invoice match precision | TP 4, FP 0 | 4/4 (100.00%)", markdown)
+        self.assertIn("False auto-approvals | 0 / 3 auto-approvals", markdown)
+        self.assertIn("exact-reference", markdown)
+        self.assertIn("not independently reviewed", markdown)
+        self.assertIn("test-commit", markdown)
 
 
 if __name__ == "__main__":

@@ -287,6 +287,17 @@ Run the curated evaluation from the project root:
 python -m evaluation.run_evaluation
 ```
 
+Generate a current JSON and Markdown report, including the date and code commit
+evaluated:
+
+```powershell
+python -m evaluation.write_report
+```
+
+The generated files are `evaluation/reports/latest.json` and
+`evaluation/reports/latest.md`. They are derived from the same evaluator result;
+rerun the command after changing code or labels.
+
 The scenario inputs are in `evaluation/dataset/transactions.csv` and
 `invoices.csv`; expected outcomes are kept separately in `labels.csv`. Every
 label has a stable `scenario_id` and `transaction_id`. The runner rejects blank
