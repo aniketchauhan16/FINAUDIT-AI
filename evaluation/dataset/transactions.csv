@@ -1,0 +1,8 @@
+transaction_id,date,amount,vendor,description,category,invoice_reference
+TX-EVAL-001,2026-01-01,100.00,"Acme, Inc.",Payment for invoice EVAL-INV-001,vendor_payment,EVAL-INV-001
+TX-EVAL-002,2026-01-02,200.00,ACME INC,Payment for invoice EVAL-INV-002,vendor_payment,EVAL-INV-002
+TX-EVAL-003,2026-01-04,1200.00,Northwind Tools,Payment for invoice EVAL-INV-003,vendor_payment,EVAL-INV-003
+TX-EVAL-004,2026-01-05,500.00,Duplicate Co,Payment for invoice EVAL-INV-004,vendor_payment,EVAL-INV-004
+TX-EVAL-005,2026-01-06,500.00,Duplicate Co,Second payment for invoice EVAL-INV-004,vendor_payment,EVAL-INV-004
+TX-EVAL-006,2026-01-07,300.00,Contoso Supply,Payment without a unique reference,vendor_payment,
+TX-EVAL-007,2026-01-09,50.00,Missing Vendor,Payment with no vendor invoice,vendor_payment,
