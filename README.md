@@ -1,108 +1,127 @@
 # FinAudit AI
 
-FinAudit AI is a local reconciliation MVP. It reads transaction and invoice CSVs,
-classifies transactions, matches vendor and amount, and stores reconciliation and
-human review results in SQLite.
+FinAudit AI is a local financial reconciliation demo. It classifies bank
+transactions, matches them to invoices, flags discrepancies for human review,
+and stores reconciliation and review decisions in SQLite. A Streamlit dashboard
+provides the operator view; FastAPI remains the source of reconciliation logic
+and data.
+
+## Tech stack
+
+- **Python** for the app and domain models
+- **FastAPI** for the local HTTP API
+- **Pydantic** for transaction, invoice, and match-result validation
+- **LangGraph** for classification, matching, and conditional routing
+- **SQLite** for durable reconciliation and review status
+- **Streamlit** for the dashboard
+- **CSV** for the sample transaction and invoice inputs
+
+## Architecture
+
+```mermaid
+flowchart LR
+    TX[Transactions CSV] --> API[FastAPI]
+    INV[Invoices CSV] --> API
+    API --> CLASSIFY[Classifier node]
+    CLASSIFY --> MATCH[Invoice matcher node]
+    MATCH --> ROUTE{Clean match?}
+    ROUTE -->|Yes| CLEAN[Auto-approved]
+    ROUTE -->|No| REVIEW[Flagged or unmatched]
+    CLEAN --> DB[(SQLite)]
+    REVIEW --> DB
+    DB --> API
+    API --> DASH[Streamlit dashboard]
+    DASH -->|Run and review actions| API
+```
 
 ## Requirements and setup
 
-- Python 3.10 or newer
-- Install the packages in `requirements.txt`
-
-From the project root, create and activate a virtual environment, then install
-the app dependencies:
+Use Python 3.10 or newer. From the project root, run these PowerShell commands:
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
-```
-
-The app expects `data/transactions.csv` and `data/invoices.csv`. Generate the
-reproducible demo CSVs with:
-
-```powershell
 python generate_sample_data.py
 ```
 
-The database is created at `data/finaudit.db` when the app starts. CSV files
-and the database are local demo data; keep your own input files backed up.
+The CSV inputs are written to `data/transactions.csv` and `data/invoices.csv`.
+The API creates `data/finaudit.db` on startup. CSV inputs and SQLite databases
+are local data and are excluded from Git.
 
-## Run the API
+## Start the local demo
+
+Open two terminals at the project root and activate the virtual environment in
+each. In Terminal 1, start FastAPI:
 
 ```powershell
-python -m uvicorn app.main:app --reload
+.\.venv\Scripts\Activate.ps1
+uvicorn app.main:app --reload
 ```
 
-Open `http://127.0.0.1:8000/docs` for interactive API documentation. The local
-server provides:
+The API health check is `http://127.0.0.1:8000/health`; interactive docs are at
+`http://127.0.0.1:8000/docs`.
+
+In Terminal 2, start Streamlit:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+streamlit run dashboard.py
+```
+
+Open the local URL printed by Streamlit, usually `http://localhost:8501`. The
+sidebar defaults to the API at `http://127.0.0.1:8000`. On the Review queue page,
+enter a reviewer name before approving or rejecting a pending result.
+
+## Demo workflow
+
+1. Select **Run reconciliation** on the Overview page.
+2. Review the summary metrics and saved match table. Amount differences at or
+   below 2% are auto-approved; larger differences and missing invoices enter
+   the review queue.
+3. Open **Review queue**, enter a reviewer name, and approve or reject a record.
+4. The queue refreshes after the action. The result table shows the decision,
+   reviewer, and review status.
+
+The sample dataset used for local verification produced 80 reconciliation
+results: 51 auto-approved and 29 initially awaiting review. An approval and a
+rejection reduced the pending queue from 29 to 27, and both decisions were
+confirmed through the API and a direct read of the SQLite database.
+
+## Screenshots
+
+**Dashboard overview**
+
+![FinAudit AI dashboard overview](docs/screenshots/dashboard-overview.png)
+
+**Reconciliation results**
+
+![FinAudit AI reconciliation results](docs/screenshots/reconciliation-results.png)
+
+## API endpoints
 
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/health` | Health check |
 | `GET` | `/transactions` | Load transactions from CSV |
 | `GET` | `/invoices` | Load invoices from CSV |
-| `POST` | `/run-reconciliation` | Run the graph and persist all results |
-| `GET` | `/reconciliation-results` | List all saved reconciliation results |
-| `GET` | `/transactions/flagged` | List results awaiting human review |
-| `POST` | `/transactions/{transaction_id}/approve` | Approve a pending result |
-| `POST` | `/transactions/{transaction_id}/reject` | Reject a pending result |
+| `POST` | `/run-reconciliation` | Run the graph and persist results |
+| `GET` | `/reconciliation-results` | List all saved match results |
+| `GET` | `/transactions/flagged` | List records awaiting review |
+| `POST` | `/transactions/{transaction_id}/approve` | Approve a pending record |
+| `POST` | `/transactions/{transaction_id}/reject` | Reject a pending record |
 
-Approve and reject requests take JSON such as:
-
-```json
-{"reviewed_by": "Alex Reviewer"}
-```
-
-They return `404` when the transaction has no saved reconciliation result and
-`409` when it is already reviewed. Invalid request bodies return `422`.
-Re-running reconciliation preserves a human decision already stored for that
-transaction.
-
-## Run the dashboard
-
-The dashboard calls the FastAPI backend; it does not run matching locally. Open
-two PowerShell terminals at the project root after completing setup above.
-
-Terminal 1, start the API:
-
-```powershell
-.\.venv\Scripts\Activate.ps1
-python -m uvicorn app.main:app --reload
-```
-
-Terminal 2, start Streamlit:
-
-```powershell
-.\.venv\Scripts\Activate.ps1
-python -m streamlit run dashboard.py
-```
-
-Streamlit opens the dashboard at `http://localhost:8501`. Keep the API running
-at `http://127.0.0.1:8000`, the default address shown in the dashboard sidebar.
-The sidebar also accepts a different API base URL. Enter a reviewer name on the
-Review queue page before approving or rejecting a result.
-
-## Demo workflow
-
-1. Generate the sample CSVs.
-2. Start the API and dashboard in separate terminals.
-3. Select **Run reconciliation** on the Overview page.
-4. Review the summary metrics and results table. The matcher auto-approves
-   amount differences at or below 2%; larger differences and missing invoices
-   enter the review queue.
-5. Open **Review queue**, enter a reviewer name, then approve or reject a
-   pending result. The dashboard refreshes after each action.
-6. The SQLite record keeps the decision and timestamp. The same endpoints are
-   also available at `http://127.0.0.1:8000/docs`.
+Review requests use JSON such as `{"reviewed_by":"Alex Reviewer"}`. Missing
+results return `404`, already reviewed results return `409`, and invalid
+reviewer values return `422`. Reconciliation reruns preserve human decisions.
 
 ## Tests
 
-Run the focused standard-library test suite from the project root:
+Run the backend test suite from the project root:
 
 ```powershell
 python -m unittest discover -s tests -v
 ```
 
-The tests cover the 2% match threshold, unmatched and discrepancy outcomes,
-conditional graph routing, review decisions, and SQLite persistence.
+Tests cover the 2% threshold, discrepancies, unmatched transactions, conditional
+graph routing, API review behavior, and SQLite persistence.
