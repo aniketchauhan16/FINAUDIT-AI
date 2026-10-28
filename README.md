@@ -279,6 +279,84 @@ amount within tolerance, no anomaly warnings, and a second safety check in the
 API before system approval. Incomplete results are kept for human review when a
 valid transaction identifier is available.
 
+## Evaluation
+
+Run the curated evaluation from the project root:
+
+```powershell
+python -m evaluation.run_evaluation
+```
+
+Generate a current JSON and Markdown report, including the date and code commit
+evaluated:
+
+```powershell
+python -m evaluation.write_report
+```
+
+The generated files are `evaluation/reports/latest.json` and
+`evaluation/reports/latest.md`. They are derived from the same evaluator result;
+rerun the command after changing code or labels.
+
+The scenario inputs are in `evaluation/dataset/transactions.csv` and
+`invoices.csv`; expected outcomes are kept separately in `labels.csv`. Every
+label has a stable `scenario_id` and `transaction_id`. The runner rejects blank
+or duplicate IDs and requires an exact one-to-one match between transaction
+inputs and labels before running predictions. It also rejects blank or duplicate
+invoice IDs and labels that reference a nonexistent invoice. Expected labels are not inferred
+from predictions. The runner calls the existing reconciliation endpoint
+function and writes to a temporary SQLite database that is removed after the
+run. It calls the endpoint function directly with a reviewer principal;
+authentication and RBAC are covered separately by the API tests. The runner
+also submits the malformed-input fixture and checks that the expected rows are
+rejected without changing the saved results.
+
+Metric definitions use one labelled transaction as a case. A correct invoice
+match is an exact predicted `invoice_id` match to a non-empty expected invoice
+ID. A wrong non-empty invoice assignment contributes one false positive and one
+false negative; an expected and predicted absence of a unique invoice is a true
+negative. Match precision is TP/(TP+FP), and recall is TP/(TP+FN). Anomaly
+metrics treat each `(transaction_id, anomaly_type)` pair as one label and use
+the same TP/FP/FN formulas. False auto-approval counts predictions with status
+`auto_approved` when the expected status is not `auto_approved` or the predicted
+invoice ID is wrong; its rate denominator is all predicted auto-approvals.
+Status and outcome accuracy are exact label agreement divided by case count.
+Manual-review rate is the number of `pending_review` results divided by case
+count. Processing failures count each result once when its outcome is
+`invalid_input` or it has a `processing_error`/`invalid_input` anomaly; the rate
+denominator is case count. CSV validation rejections are reported separately
+from per-transaction processing failures. Every rate reports its numerator and
+denominator; a zero denominator produces `percent: null` rather than a
+misleading zero percent.
+
+This is a small hand-labelled smoke benchmark covering exact matches, vendor
+punctuation and case variation, amount discrepancies, duplicate payments, tied
+invoice candidates, an unmatched vendor, missing required fields, and malformed
+amount input. Existing fail-closed workflow tests cover graph exceptions and
+incomplete outputs; the evaluator's error metric is also tested with a synthetic
+processing-error result. Its percentages describe these curated cases only;
+they are not a statistically representative estimate of production
+performance. The expected labels are curated with these fixtures, not
+independently adjudicated or held out; exact-reference scenarios intentionally
+use the transaction's reference field, so this set is not a blind benchmark.
+
+### Independent label review
+
+Generate a reviewer worksheet without prediction columns:
+
+```powershell
+python -m evaluation.review_labels
+```
+
+This writes `evaluation/dataset/label-review.csv` from the stable scenario IDs,
+separate labels, and input files. Every row is explicitly marked
+`independently_reviewed=no` and `reviewer_status=pending`. A reviewer should
+compare the transaction and invoice inputs with the documented business rules,
+record their status and any disagreement, and keep system predictions out of
+the blind review copy. Resolve disagreements by documenting the evidence and
+changing labels only after agreement; retain the prior file in version history.
+The worksheet is a review aid, not proof that independent review occurred.
+
 ## Tests
 
 Run the backend test suite from the project root:
@@ -295,4 +373,6 @@ migration, review persistence across reruns, fail-closed graph exceptions,
 ambiguous/duplicate routing, review-event migrations and persistence, atomic
 review rollback, review-state conflicts, password hashing, login/logout,
 session expiry, role authorization, admin account management, authenticated
-audit attribution, dashboard login, dashboard history, and all original tests.
+audit attribution, dashboard login, dashboard history, evaluation metric
+definitions, exact label coverage, processing-error metrics, labelled
+acceptance scenarios, and all original tests.

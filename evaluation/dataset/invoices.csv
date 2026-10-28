@@ -1,0 +1,7 @@
+invoice_id,vendor,amount,date,description
+EVAL-INV-001,"Acme, Inc.",100.00,2026-01-01,Exact reference match
+EVAL-INV-002,Acme Inc.,200.00,2026-01-02,Vendor punctuation and case variation
+EVAL-INV-003,Northwind Tools,1000.00,2026-01-04,Amount discrepancy
+EVAL-INV-004,Duplicate Co,500.00,2026-01-05,Potential duplicate payment
+EVAL-INV-006-A,Contoso Supply,300.00,2026-01-07,Tied candidate A
+EVAL-INV-006-B,Contoso Supply,300.00,2026-01-07,Tied candidate B

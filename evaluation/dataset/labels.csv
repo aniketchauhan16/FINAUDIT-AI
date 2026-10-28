@@ -1,0 +1,8 @@
+scenario_id,transaction_id,expected_invoice_id,expected_status,expected_outcome,expected_anomalies,scenario
+exact-reference,TX-EVAL-001,EVAL-INV-001,auto_approved,exact_match,,Exact unique reference match
+vendor-variation,TX-EVAL-002,EVAL-INV-002,auto_approved,exact_match,,Vendor case and punctuation variation
+amount-discrepancy,TX-EVAL-003,EVAL-INV-003,flagged,amount_mismatch,amount_discrepancy,Amount exceeds configured tolerance
+first-payment,TX-EVAL-004,EVAL-INV-004,auto_approved,exact_match,,First payment against invoice
+duplicate-payment,TX-EVAL-005,,flagged,potential_duplicate_payment,potential_duplicate_payment;duplicate_invoice_assignment,Repeated payment and reused invoice assignment
+tied-candidates,TX-EVAL-006,,flagged,ambiguous_candidates,ambiguous_match,Tied invoice candidates
+unmatched-vendor,TX-EVAL-007,,unmatched,vendor_mismatch,unmatched_transaction,No invoice for transaction vendor

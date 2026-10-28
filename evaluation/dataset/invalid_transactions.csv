@@ -1,0 +1,3 @@
+transaction_id,date,amount,vendor,description,category
+TX-EVAL-INVALID-MISSING,2026-01-10,25.00,,Missing required vendor,vendor_payment
+TX-EVAL-INVALID-AMOUNT,2026-01-10,not-a-number,Acme,Malformed amount,vendor_payment

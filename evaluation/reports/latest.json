@@ -1,0 +1,192 @@
+{
+  "benchmark": "FinAudit AI curated evaluation v1",
+  "database": "temporary SQLite database (removed after run)",
+  "dataset_limitations": "Small hand-labelled smoke benchmark; percentages describe these cases only and are not a production estimate.",
+  "metrics": {
+    "case_count": 7,
+    "match": {
+      "true_positive": 4,
+      "false_positive": 0,
+      "false_negative": 0,
+      "true_negative": 3,
+      "precision": {
+        "numerator": 4,
+        "denominator": 4,
+        "percent": 100.0
+      },
+      "recall": {
+        "numerator": 4,
+        "denominator": 4,
+        "percent": 100.0
+      }
+    },
+    "false_auto_approval": {
+      "count": 0,
+      "among_auto_approvals": {
+        "numerator": 0,
+        "denominator": 3,
+        "percent": 0.0
+      },
+      "auto_approval_count": 3
+    },
+    "anomalies": {
+      "true_positive": 5,
+      "false_positive": 0,
+      "false_negative": 0,
+      "precision": {
+        "numerator": 5,
+        "denominator": 5,
+        "percent": 100.0
+      },
+      "recall": {
+        "numerator": 5,
+        "denominator": 5,
+        "percent": 100.0
+      }
+    },
+    "status_accuracy": {
+      "numerator": 7,
+      "denominator": 7,
+      "percent": 100.0
+    },
+    "outcome_accuracy": {
+      "numerator": 7,
+      "denominator": 7,
+      "percent": 100.0
+    },
+    "manual_review": {
+      "pending_count": 4,
+      "rate": {
+        "numerator": 4,
+        "denominator": 7,
+        "percent": 57.14
+      }
+    },
+    "processing_failures": {
+      "count": 0,
+      "rate": {
+        "numerator": 0,
+        "denominator": 7,
+        "percent": 0.0
+      }
+    },
+    "cases": [
+      {
+        "transaction_id": "TX-EVAL-001",
+        "scenario_id": "exact-reference",
+        "scenario": "Exact unique reference match",
+        "expected_invoice_id": "EVAL-INV-001",
+        "predicted_invoice_id": "EVAL-INV-001",
+        "expected_status": "auto_approved",
+        "predicted_status": "auto_approved",
+        "expected_outcome": "exact_match",
+        "predicted_outcome": "exact_match",
+        "expected_anomalies": [],
+        "predicted_anomalies": []
+      },
+      {
+        "transaction_id": "TX-EVAL-002",
+        "scenario_id": "vendor-variation",
+        "scenario": "Vendor case and punctuation variation",
+        "expected_invoice_id": "EVAL-INV-002",
+        "predicted_invoice_id": "EVAL-INV-002",
+        "expected_status": "auto_approved",
+        "predicted_status": "auto_approved",
+        "expected_outcome": "exact_match",
+        "predicted_outcome": "exact_match",
+        "expected_anomalies": [],
+        "predicted_anomalies": []
+      },
+      {
+        "transaction_id": "TX-EVAL-003",
+        "scenario_id": "amount-discrepancy",
+        "scenario": "Amount exceeds configured tolerance",
+        "expected_invoice_id": "EVAL-INV-003",
+        "predicted_invoice_id": "EVAL-INV-003",
+        "expected_status": "flagged",
+        "predicted_status": "flagged",
+        "expected_outcome": "amount_mismatch",
+        "predicted_outcome": "amount_mismatch",
+        "expected_anomalies": [
+          "amount_discrepancy"
+        ],
+        "predicted_anomalies": [
+          "amount_discrepancy"
+        ]
+      },
+      {
+        "transaction_id": "TX-EVAL-004",
+        "scenario_id": "first-payment",
+        "scenario": "First payment against invoice",
+        "expected_invoice_id": "EVAL-INV-004",
+        "predicted_invoice_id": "EVAL-INV-004",
+        "expected_status": "auto_approved",
+        "predicted_status": "auto_approved",
+        "expected_outcome": "exact_match",
+        "predicted_outcome": "exact_match",
+        "expected_anomalies": [],
+        "predicted_anomalies": []
+      },
+      {
+        "transaction_id": "TX-EVAL-005",
+        "scenario_id": "duplicate-payment",
+        "scenario": "Repeated payment and reused invoice assignment",
+        "expected_invoice_id": null,
+        "predicted_invoice_id": null,
+        "expected_status": "flagged",
+        "predicted_status": "flagged",
+        "expected_outcome": "potential_duplicate_payment",
+        "predicted_outcome": "potential_duplicate_payment",
+        "expected_anomalies": [
+          "duplicate_invoice_assignment",
+          "potential_duplicate_payment"
+        ],
+        "predicted_anomalies": [
+          "duplicate_invoice_assignment",
+          "potential_duplicate_payment"
+        ]
+      },
+      {
+        "transaction_id": "TX-EVAL-006",
+        "scenario_id": "tied-candidates",
+        "scenario": "Tied invoice candidates",
+        "expected_invoice_id": null,
+        "predicted_invoice_id": null,
+        "expected_status": "flagged",
+        "predicted_status": "flagged",
+        "expected_outcome": "ambiguous_candidates",
+        "predicted_outcome": "ambiguous_candidates",
+        "expected_anomalies": [
+          "ambiguous_match"
+        ],
+        "predicted_anomalies": [
+          "ambiguous_match"
+        ]
+      },
+      {
+        "transaction_id": "TX-EVAL-007",
+        "scenario_id": "unmatched-vendor",
+        "scenario": "No invoice for transaction vendor",
+        "expected_invoice_id": null,
+        "predicted_invoice_id": null,
+        "expected_status": "unmatched",
+        "predicted_status": "unmatched",
+        "expected_outcome": "vendor_mismatch",
+        "predicted_outcome": "vendor_mismatch",
+        "expected_anomalies": [
+          "unmatched_transaction"
+        ],
+        "predicted_anomalies": [
+          "unmatched_transaction"
+        ]
+      }
+    ]
+  },
+  "csv_validation": {
+    "http_status": 422,
+    "rejected_row_count": 2,
+    "labels_match": true
+  },
+  "evaluated_date": "2026-10-28",
+  "evaluated_commit": "05a3677"
+}
