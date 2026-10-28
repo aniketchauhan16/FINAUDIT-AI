@@ -328,6 +328,23 @@ performance. The expected labels are curated with these fixtures, not
 independently adjudicated or held out; exact-reference scenarios intentionally
 use the transaction's reference field, so this set is not a blind benchmark.
 
+### Independent label review
+
+Generate a reviewer worksheet without prediction columns:
+
+```powershell
+python -m evaluation.review_labels
+```
+
+This writes `evaluation/dataset/label-review.csv` from the stable scenario IDs,
+separate labels, and input files. Every row is explicitly marked
+`independently_reviewed=no` and `reviewer_status=pending`. A reviewer should
+compare the transaction and invoice inputs with the documented business rules,
+record their status and any disagreement, and keep system predictions out of
+the blind review copy. Resolve disagreements by documenting the evidence and
+changing labels only after agreement; retain the prior file in version history.
+The worksheet is a review aid, not proof that independent review occurred.
+
 ## Tests
 
 Run the backend test suite from the project root:

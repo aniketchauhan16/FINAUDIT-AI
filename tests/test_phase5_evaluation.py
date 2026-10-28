@@ -1,3 +1,4 @@
+import csv
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,6 +15,7 @@ from evaluation.run_evaluation import (
     score_predictions,
     validate_label_coverage,
 )
+from evaluation.review_labels import FIELDS as REVIEW_FIELDS, generate_review_worksheet
 from app.agents.validation import failure_match_result
 from app.models import MatchOutcome, MatchResult, MatchStatus, ReviewStatus
 
@@ -178,6 +180,18 @@ class Phase5EvaluationTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(AssertionError, "identifiers differ"):
                 _validate_malformed_csv(INVALID_LABELS_PATH)
+
+    def test_review_worksheet_is_pending_and_excludes_predictions(self):
+        with tempfile.TemporaryDirectory() as temp:
+            worksheet = Path(temp) / "review.csv"
+            self.assertEqual(generate_review_worksheet(worksheet), 7)
+            with worksheet.open(newline="", encoding="utf-8") as source:
+                rows = list(csv.DictReader(source))
+            self.assertEqual(len(rows), 7)
+            self.assertEqual(set(rows[0]), set(REVIEW_FIELDS))
+            self.assertNotIn("predicted_outcome", REVIEW_FIELDS)
+            self.assertTrue(all(row["reviewer_status"] == "pending" for row in rows))
+            self.assertTrue(all(row["independently_reviewed"] == "no" for row in rows))
 
 
 if __name__ == "__main__":
