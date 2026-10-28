@@ -21,6 +21,7 @@ from app.models import (
     MatchStatus,
     ReviewStatus,
 )
+from tests.auth_support import login_test_user
 
 
 def pending_result(transaction_id: str) -> MatchResult:
@@ -64,6 +65,9 @@ class ReviewAuditApiTests(unittest.TestCase):
             patcher.start()
         self.client = TestClient(main_module.app)
         self.client.__enter__()
+        self.reviewer = login_test_user(
+            self.client, username="phase3_reviewer"
+        )
 
     def tearDown(self):
         self.client.__exit__(None, None, None)
@@ -81,11 +85,11 @@ class ReviewAuditApiTests(unittest.TestCase):
 
         approved = self.client.post(
             "/transactions/TX-APPROVE/approve",
-            json={"reviewed_by": "Reviewer A", "reason": " Invoice verified. "},
+            json={"reason": " Invoice verified. "},
         )
         rejected = self.client.post(
             "/transactions/TX-REJECT/reject",
-            json={"reviewed_by": "Reviewer B", "reason": "Invoice could not be verified."},
+            json={"reason": "Invoice could not be verified."},
         )
         self.assertEqual(approved.status_code, 200, approved.text)
         self.assertEqual(rejected.status_code, 200, rejected.text)
@@ -93,9 +97,11 @@ class ReviewAuditApiTests(unittest.TestCase):
         self.assertEqual(approved.json()["anomalies"][0]["type"], "ambiguous_match")
 
         # Restart the API lifespan against the same temporary SQLite file.
+        authorization = self.client.headers["Authorization"]
         self.client.__exit__(None, None, None)
         self.client = TestClient(main_module.app)
         self.client.__enter__()
+        self.client.headers.update({"Authorization": authorization})
         approve_event = self.client.get("/transactions/TX-APPROVE/review-history")
         reject_event = self.client.get("/transactions/TX-REJECT/review-history")
         self.assertEqual(approve_event.status_code, 200)
@@ -103,7 +109,7 @@ class ReviewAuditApiTests(unittest.TestCase):
         self.assertEqual(len(approve_event.json()), 1)
         self.assertEqual(len(reject_event.json()), 1)
         self.assertEqual(approve_event.json()[0]["action"], "approved")
-        self.assertEqual(approve_event.json()[0]["reviewed_by"], "Reviewer A")
+        self.assertEqual(approve_event.json()[0]["reviewed_by"], self.reviewer)
         self.assertEqual(approve_event.json()[0]["reason"], "Invoice verified.")
         self.assertEqual(approve_event.json()[0]["previous_review_status"], "pending_review")
         self.assertEqual(approve_event.json()[0]["new_review_status"], "approved")
@@ -121,13 +127,13 @@ class ReviewAuditApiTests(unittest.TestCase):
         self.save_pending("TX-CONFLICT")
         first = self.client.post(
             "/transactions/TX-CONFLICT/approve",
-            json={"reviewed_by": "Reviewer", "reason": "Approved once."},
+            json={"reason": "Approved once."},
         )
         repeat = self.client.post(
-            "/transactions/TX-CONFLICT/approve", json={"reviewed_by": "Reviewer"}
+            "/transactions/TX-CONFLICT/approve", json={}
         )
         conflict = self.client.post(
-            "/transactions/TX-CONFLICT/reject", json={"reviewed_by": "Reviewer"}
+            "/transactions/TX-CONFLICT/reject", json={}
         )
         self.assertEqual(first.status_code, 200)
         self.assertEqual(repeat.status_code, 409)
@@ -178,14 +184,14 @@ class ReviewAuditApiTests(unittest.TestCase):
 
         response = self.client.post(
             "/transactions/TX-RERUN-RACE/approve",
-            json={"reviewed_by": "Race Reviewer", "reason": "Checked invoice."},
+            json={"reason": "Checked invoice."},
         )
         self.assertEqual(response.status_code, 200, response.text)
 
         persisted = database.save_match_result(stale_reconciliation)
         self.assertEqual(persisted.review_status, ReviewStatus.approved)
         self.assertEqual(persisted.status, MatchStatus.approved)
-        self.assertEqual(persisted.reviewed_by, "Race Reviewer")
+        self.assertEqual(persisted.reviewed_by, self.reviewer)
         self.assertEqual(persisted.reason, "Recomputed reconciliation evidence.")
         self.assertEqual(persisted.evidence, {"refreshed_match_score": 0.8})
         history = database.get_review_history("TX-RERUN-RACE")
@@ -199,11 +205,11 @@ class ReviewAuditApiTests(unittest.TestCase):
 
         legacy_payload = self.client.post(
             "/transactions/TX-OPTIONAL-REASON/approve",
-            json={"reviewed_by": "Reviewer"},
+            json={},
         )
         invalid_reason = self.client.post(
             "/transactions/TX-INVALID-REASON/reject",
-            json={"reviewed_by": "Reviewer", "reason": "x" * 1001},
+            json={"reason": "x" * 1001},
         )
         self.assertEqual(legacy_payload.status_code, 200, legacy_payload.text)
         self.assertIsNone(self.client.get("/transactions/TX-OPTIONAL-REASON/review-history").json()[0]["reason"])
@@ -216,7 +222,7 @@ class ReviewAuditApiTests(unittest.TestCase):
         self.assertEqual(self.client.get("/transactions/TX-HISTORY/review-history").json(), [])
         self.assertEqual(self.client.get("/transactions/DOES-NOT-EXIST/review-history").status_code, 404)
         self.assertEqual(
-            self.client.post("/transactions/DOES-NOT-EXIST/approve", json={"reviewed_by": "Reviewer"}).status_code,
+            self.client.post("/transactions/DOES-NOT-EXIST/approve", json={}).status_code,
             404,
         )
 
@@ -252,7 +258,7 @@ class ReviewAuditApiTests(unittest.TestCase):
             )
 
         response = self.client.post(
-            "/transactions/TX-ROLLBACK/approve", json={"reviewed_by": "Reviewer"}
+            "/transactions/TX-ROLLBACK/approve", json={}
         )
         self.assertEqual(response.status_code, 500)
         self.assertEqual(
@@ -265,7 +271,7 @@ class ReviewAuditApiTests(unittest.TestCase):
     def test_review_event_rows_cannot_be_updated_or_deleted_by_normal_sql(self):
         self.save_pending("TX-APPEND-ONLY")
         response = self.client.post(
-            "/transactions/TX-APPEND-ONLY/reject", json={"reviewed_by": "Reviewer"}
+            "/transactions/TX-APPEND-ONLY/reject", json={}
         )
         self.assertEqual(response.status_code, 200)
         with self.assertRaises(sqlite3.IntegrityError):
@@ -382,7 +388,13 @@ class ReviewHistoryDashboardTests(unittest.TestCase):
 
         def fake_urlopen(request, timeout=20):
             path = urlsplit(request.full_url).path
-            if path == "/reconciliation-results":
+            if path == "/auth/me":
+                payload = {
+                    "user_id": "user-auditor",
+                    "username": "dashboard_auditor",
+                    "role": "auditor",
+                }
+            elif path == "/reconciliation-results":
                 payload = results
             elif path == "/transactions/TX-DASH/review-history":
                 payload = history_by_transaction.get("TX-DASH", [])
@@ -390,8 +402,10 @@ class ReviewHistoryDashboardTests(unittest.TestCase):
                 raise AssertionError(f"Unexpected dashboard API request: {path}")
             return FakeResponse(payload)
 
+        at = AppTest.from_file(str(dashboard_path), default_timeout=20).run()
+        at.session_state["access_token"] = "fake-session"
         with patch("urllib.request.urlopen", side_effect=fake_urlopen):
-            at = AppTest.from_file(str(dashboard_path), default_timeout=20).run()
+            at.run()
             at.radio[0].set_value("Review history").run()
         self.assertFalse(at.exception, [str(item.value) for item in at.exception])
         self.assertTrue(at.dataframe)
@@ -400,8 +414,10 @@ class ReviewHistoryDashboardTests(unittest.TestCase):
         self.assertEqual(displayed.iloc[0]["Reason"], "Supporting invoice checked.")
 
         history_by_transaction["TX-DASH"] = []
+        empty_at = AppTest.from_file(str(dashboard_path), default_timeout=20).run()
+        empty_at.session_state["access_token"] = "fake-session"
         with patch("urllib.request.urlopen", side_effect=fake_urlopen):
-            empty_at = AppTest.from_file(str(dashboard_path), default_timeout=20).run()
+            empty_at.run()
             empty_at.radio[0].set_value("Review history").run()
         self.assertFalse(empty_at.exception, [str(item.value) for item in empty_at.exception])
         self.assertTrue(any("No review events are recorded" in item.value for item in empty_at.info))

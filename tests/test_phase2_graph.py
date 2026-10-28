@@ -19,6 +19,7 @@ from app.models import (
     ReviewStatus,
     Transaction,
 )
+from tests.auth_support import login_test_user
 
 
 def transaction(*, amount: str = "100.00", on: date = date(2026, 1, 1)) -> Transaction:
@@ -294,6 +295,7 @@ class APIFailClosedTests(unittest.TestCase):
         ):
             graph.invoke.return_value = graph_result
             with TestClient(main_module.app) as client:
+                login_test_user(client)
                 response = client.post("/run-reconciliation")
             saved = database.get_match_result("TX-API")
         return temp, response, saved
@@ -383,6 +385,7 @@ class APIFailClosedTests(unittest.TestCase):
             ):
                 graph.invoke.side_effect = claim_clean_match
                 with TestClient(main_module.app) as client:
+                    login_test_user(client)
                     response = client.post("/run-reconciliation")
                 saved = database.get_all_match_results()
 
@@ -417,7 +420,9 @@ class APIFailClosedTests(unittest.TestCase):
                 patch.object(main_module, "reconciliation_graph") as graph,
             ):
                 graph.invoke.side_effect = RuntimeError("unexpected graph failure")
-                response = TestClient(main_module.app).post("/run-reconciliation")
+                with TestClient(main_module.app) as client:
+                    login_test_user(client)
+                    response = client.post("/run-reconciliation")
                 pending = database.get_pending_review_results()
             self.assertEqual(response.status_code, 200, response.text)
             result = response.json()[0]

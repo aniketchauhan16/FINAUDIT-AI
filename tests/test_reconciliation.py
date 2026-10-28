@@ -13,11 +13,13 @@ from app.agents.matcher import match_transaction
 from app.agents.state import ReconciliationState
 from app.main import ReviewAction, apply_review_status, approve_transaction, reject_transaction
 from app.models import (
+    AuthenticatedUser,
     Invoice,
     MatchResult,
     MatchStatus,
     ReviewStatus,
     Transaction,
+    UserRole,
 )
 
 
@@ -107,11 +109,14 @@ class ReviewPersistenceTests(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def test_approve_persists_decision(self):
-        reviewed = approve_transaction("TX-1", ReviewAction(reviewed_by="  Reviewer A  "))
+        reviewer = AuthenticatedUser(
+            user_id="test-reviewer-a", username="reviewer_a", role=UserRole.reviewer
+        )
+        reviewed = approve_transaction("TX-1", ReviewAction(), reviewer)
         loaded = database.get_match_result("TX-1")
         self.assertEqual(loaded.review_status, ReviewStatus.approved)
         self.assertEqual(loaded.status, MatchStatus.approved)
-        self.assertEqual(loaded.reviewed_by, "Reviewer A")
+        self.assertEqual(loaded.reviewed_by, "reviewer_a")
         self.assertIsNotNone(loaded.reviewed_at)
         self.assertEqual(reviewed, loaded)
         rerun_result = apply_review_status(
@@ -125,27 +130,39 @@ class ReviewPersistenceTests(unittest.TestCase):
             )
         )
         self.assertEqual(rerun_result.status, MatchStatus.approved)
-        self.assertEqual(rerun_result.reviewed_by, "Reviewer A")
+        self.assertEqual(rerun_result.reviewed_by, "reviewer_a")
         self.assertEqual(database.get_all_match_results(), [loaded])
 
     def test_reject_persists_and_cannot_be_overwritten(self):
-        reviewed = reject_transaction("TX-1", ReviewAction(reviewed_by="Reviewer B"))
+        reviewer = AuthenticatedUser(
+            user_id="test-reviewer-b", username="reviewer_b", role=UserRole.reviewer
+        )
+        reviewed = reject_transaction("TX-1", ReviewAction(), reviewer)
         self.assertEqual(reviewed.review_status, ReviewStatus.rejected)
         self.assertEqual(reviewed.status, MatchStatus.rejected)
         with self.assertRaises(HTTPException) as raised:
-            approve_transaction("TX-1", ReviewAction(reviewed_by="Reviewer C"))
+            approve_transaction(
+                "TX-1",
+                ReviewAction(),
+                AuthenticatedUser(
+                    user_id="test-reviewer-c", username="reviewer_c", role=UserRole.reviewer
+                ),
+            )
         self.assertEqual(raised.exception.status_code, 409)
 
     def test_missing_result_returns_not_found(self):
+        reviewer = AuthenticatedUser(
+            user_id="test-reviewer", username="reviewer", role=UserRole.reviewer
+        )
         with self.assertRaises(HTTPException) as raised:
-            approve_transaction("missing", ReviewAction(reviewed_by="Reviewer"))
+            approve_transaction("missing", ReviewAction(), reviewer)
         self.assertEqual(raised.exception.status_code, 404)
 
-    def test_blank_reviewer_is_rejected(self):
+    def test_client_cannot_supply_a_reviewer_identity(self):
         from pydantic import ValidationError
 
         with self.assertRaises(ValidationError):
-            ReviewAction(reviewed_by="   ")
+            ReviewAction(reviewed_by="spoofed_user")
 
 
 if __name__ == "__main__":

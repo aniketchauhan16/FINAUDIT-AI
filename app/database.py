@@ -1,6 +1,7 @@
 import csv
 import json
 import sqlite3
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from contextlib import contextmanager
 from decimal import Decimal
@@ -10,14 +11,14 @@ from uuid import uuid4
 
 from pydantic import ValidationError
 
-from app.models import Anomaly, AnomalySeverity, Invoice, MatchOutcome, MatchResult, MatchStatus, ReviewEvent, ReviewStatus, Transaction
+from app.models import Anomaly, AnomalySeverity, Invoice, MatchOutcome, MatchResult, MatchStatus, ReviewEvent, ReviewStatus, Transaction, UserRole
 
 
 DATA_DIR = Path("data")
 TRANSACTIONS_CSV = DATA_DIR / "transactions.csv"
 INVOICES_CSV = DATA_DIR / "invoices.csv"
 DATABASE_PATH = DATA_DIR / "finaudit.db"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 T = TypeVar("T")
 
@@ -228,6 +229,7 @@ def get_connection() -> Iterator[sqlite3.Connection]:
     DATA_DIR.mkdir(exist_ok=True)
     connection = sqlite3.connect(DATABASE_PATH)
     connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA foreign_keys = ON")
     try:
         with connection:
             yield connection
@@ -273,6 +275,7 @@ def init_db() -> None:
                 transaction_id TEXT NOT NULL,
                 action TEXT NOT NULL CHECK(action IN ('approved', 'rejected')),
                 reviewed_by TEXT NOT NULL,
+                reviewer_user_id TEXT,
                 occurred_at TEXT NOT NULL,
                 reason TEXT,
                 previous_review_status TEXT NOT NULL,
@@ -282,6 +285,13 @@ def init_db() -> None:
             )
             """
         )
+        event_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(review_events)")
+        }
+        if "reviewer_user_id" not in event_columns:
+            connection.execute(
+                "ALTER TABLE review_events ADD COLUMN reviewer_user_id TEXT"
+            )
         connection.execute(
             """
             CREATE INDEX IF NOT EXISTS review_events_by_transaction_time
@@ -305,6 +315,32 @@ def init_db() -> None:
                 SELECT RAISE(ABORT, 'review events are append-only');
             END
             """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                user_id TEXT PRIMARY KEY,
+                username TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                password_hash TEXT NOT NULL,
+                role TEXT NOT NULL CHECK(role IN ('admin', 'reviewer', 'auditor')),
+                is_active INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0, 1)),
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS auth_sessions (
+                token_hash TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL REFERENCES users(user_id),
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                revoked_at TEXT
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS auth_sessions_by_user ON auth_sessions(user_id)"
         )
         version = connection.execute("PRAGMA user_version").fetchone()[0]
         if version < SCHEMA_VERSION:
@@ -392,6 +428,158 @@ def save_match_results(match_results: list[MatchResult]) -> list[MatchResult]:
     return [save_match_result(match_result) for match_result in match_results]
 
 
+class UserAlreadyExistsError(Exception):
+    """Raised when an account username is already registered."""
+
+
+class UserNotFoundError(Exception):
+    """Raised when an account cannot be found."""
+
+
+class LastActiveAdminError(Exception):
+    """Raised when an update would leave no active administrator."""
+
+
+def _user_summary(row: sqlite3.Row) -> dict:
+    return {
+        "user_id": row["user_id"],
+        "username": row["username"],
+        "role": row["role"],
+        "is_active": bool(row["is_active"]),
+        "created_at": row["created_at"],
+    }
+
+
+def create_user(
+    user_id: str, username: str, password_hash: str, role: UserRole, created_at: str
+) -> dict:
+    init_db()
+    try:
+        with get_connection() as connection:
+            connection.execute(
+                """INSERT INTO users (user_id, username, password_hash, role, is_active, created_at)
+                   VALUES (?, ?, ?, ?, 1, ?)""",
+                (user_id, username, password_hash, role.value, created_at),
+            )
+            row = connection.execute(
+                "SELECT * FROM users WHERE user_id = ?", (user_id,)
+            ).fetchone()
+    except sqlite3.IntegrityError as exc:
+        raise UserAlreadyExistsError(username) from exc
+    return _user_summary(row)
+
+
+def bootstrap_admin(username: str, password_hash: str, user_id: str, created_at: str) -> bool:
+    """Create the first configured admin only when the database has no users."""
+    init_db()
+    with get_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        has_users = connection.execute("SELECT 1 FROM users LIMIT 1").fetchone()
+        if has_users is not None:
+            return False
+        cursor = connection.execute(
+            """INSERT INTO users
+               (user_id, username, password_hash, role, is_active, created_at)
+               VALUES (?, ?, ?, 'admin', 1, ?)""",
+            (user_id, username, password_hash, created_at),
+        )
+    return cursor.rowcount == 1
+
+
+def get_user_by_username(username: str) -> dict | None:
+    init_db()
+    with get_connection() as connection:
+        row = connection.execute(
+            "SELECT * FROM users WHERE username = ? COLLATE NOCASE", (username,)
+        ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def get_user_by_id(user_id: str) -> dict | None:
+    init_db()
+    with get_connection() as connection:
+        row = connection.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
+    return dict(row) if row is not None else None
+
+
+def create_auth_session(
+    token_hash: str, user_id: str, created_at: str, expires_at: str
+) -> None:
+    init_db()
+    with get_connection() as connection:
+        connection.execute(
+            "INSERT INTO auth_sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
+            (token_hash, user_id, created_at, expires_at),
+        )
+
+
+def get_session_user(token_hash: str, now: str) -> dict | None:
+    init_db()
+    with get_connection() as connection:
+        row = connection.execute(
+            """SELECT u.user_id, u.username, u.role, u.is_active
+               FROM auth_sessions s JOIN users u ON u.user_id = s.user_id
+               WHERE s.token_hash = ? AND s.revoked_at IS NULL
+                 AND s.expires_at > ? AND u.is_active = 1""",
+            (token_hash, now),
+        ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def revoke_auth_session(token_hash: str, revoked_at: str) -> bool:
+    init_db()
+    with get_connection() as connection:
+        cursor = connection.execute(
+            "UPDATE auth_sessions SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL",
+            (revoked_at, token_hash),
+        )
+    return cursor.rowcount == 1
+
+
+def list_users() -> list[dict]:
+    init_db()
+    with get_connection() as connection:
+        rows = connection.execute(
+            "SELECT user_id, username, role, is_active, created_at FROM users ORDER BY username COLLATE NOCASE"
+        ).fetchall()
+    return [_user_summary(row) for row in rows]
+
+
+def update_user(
+    user_id: str, role: UserRole | None = None, is_active: bool | None = None
+) -> dict:
+    init_db()
+    with get_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        current = connection.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        if current is None:
+            raise UserNotFoundError(user_id)
+        next_role = role.value if role is not None else current["role"]
+        next_active = int(is_active) if is_active is not None else current["is_active"]
+        if current["role"] == UserRole.admin.value and current["is_active"] and (
+            next_role != UserRole.admin.value or not next_active
+        ):
+            other_admin = connection.execute(
+                "SELECT 1 FROM users WHERE role = 'admin' AND is_active = 1 AND user_id <> ? LIMIT 1",
+                (user_id,),
+            ).fetchone()
+            if other_admin is None:
+                raise LastActiveAdminError(user_id)
+        if next_role != current["role"] or next_active != current["is_active"]:
+            revoked_at = datetime.now(timezone.utc).isoformat()
+            connection.execute(
+                """UPDATE auth_sessions SET revoked_at = COALESCE(revoked_at, ?)
+                   WHERE user_id = ?""",
+                (revoked_at, user_id),
+            )
+        connection.execute(
+            "UPDATE users SET role = ?, is_active = ? WHERE user_id = ?",
+            (next_role, next_active, user_id),
+        )
+        row = connection.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
+    return _user_summary(row)
+
+
 def get_match_result(transaction_id: str) -> MatchResult | None:
     init_db()
 
@@ -454,6 +642,7 @@ def record_review(
     reviewed_by: str,
     reviewed_at: str,
     reason: str | None = None,
+    reviewer_user_id: str | None = None,
 ) -> MatchResult:
     """Persist a human decision only while the result is pending review."""
     init_db()
@@ -499,16 +688,17 @@ def record_review(
         connection.execute(
             """
             INSERT INTO review_events (
-                event_id, transaction_id, action, reviewed_by, occurred_at, reason,
+                event_id, transaction_id, action, reviewed_by, reviewer_user_id, occurred_at, reason,
                 previous_review_status, new_review_status,
                 previous_match_status, new_match_status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 str(uuid4()),
                 transaction_id,
                 decision.value,
                 reviewer,
+                reviewer_user_id,
                 reviewed_at,
                 normalized_reason,
                 current["review_status"],
@@ -574,6 +764,7 @@ def row_to_review_event(row: sqlite3.Row) -> ReviewEvent:
         transaction_id=row["transaction_id"],
         action=row["action"],
         reviewed_by=row["reviewed_by"],
+        reviewer_user_id=row["reviewer_user_id"] if "reviewer_user_id" in row.keys() else None,
         occurred_at=row["occurred_at"],
         reason=row["reason"],
         previous_review_status=row["previous_review_status"],

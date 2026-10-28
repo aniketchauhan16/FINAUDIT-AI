@@ -21,6 +21,7 @@ from app.models import (
     ReviewStatus,
     Transaction,
 )
+from tests.auth_support import login_test_user
 
 
 def txn(
@@ -271,27 +272,30 @@ class PersistenceAndIntegrationTests(unittest.TestCase):
                 patch.object(database, "TRANSACTIONS_CSV", transactions),
                 patch.object(database, "INVOICES_CSV", invoices),
             ):
-                client = TestClient(app)
-                first_response = client.post("/run-reconciliation")
-                self.assertEqual(first_response.status_code, 200, first_response.text)
-                first_run = first_response.json()
-                self.assertEqual(first_run[0]["invoice_id"], "INV-1")
-                self.assertIsNone(first_run[1]["invoice_id"])
-                self.assertEqual(first_run[1]["match_outcome"], MatchOutcome.potential_duplicate_payment.value)
-                review_response = client.post(
-                    "/transactions/TX-2/approve", json={"reviewed_by": "Phase One Reviewer"}
-                )
-                self.assertEqual(review_response.status_code, 200, review_response.text)
-                self.assertEqual(review_response.json()["review_status"], ReviewStatus.approved.value)
-                second_response = client.post("/run-reconciliation")
-                self.assertEqual(second_response.status_code, 200, second_response.text)
-                second_run = second_response.json()
-                self.assertEqual(second_run[1]["review_status"], ReviewStatus.approved.value)
-                self.assertEqual(second_run[1]["reviewed_by"], "Phase One Reviewer")
-                results_response = client.get("/reconciliation-results")
-                self.assertEqual(results_response.status_code, 200)
+                with TestClient(app) as client:
+                    reviewer = login_test_user(
+                        client, username="phase_one_reviewer"
+                    )
+                    first_response = client.post("/run-reconciliation")
+                    self.assertEqual(first_response.status_code, 200, first_response.text)
+                    first_run = first_response.json()
+                    self.assertEqual(first_run[0]["invoice_id"], "INV-1")
+                    self.assertIsNone(first_run[1]["invoice_id"])
+                    self.assertEqual(first_run[1]["match_outcome"], MatchOutcome.potential_duplicate_payment.value)
+                    review_response = client.post(
+                        "/transactions/TX-2/approve", json={"reason": "Phase One review."}
+                    )
+                    self.assertEqual(review_response.status_code, 200, review_response.text)
+                    self.assertEqual(review_response.json()["review_status"], ReviewStatus.approved.value)
+                    second_response = client.post("/run-reconciliation")
+                    self.assertEqual(second_response.status_code, 200, second_response.text)
+                    second_run = second_response.json()
+                    self.assertEqual(second_run[1]["review_status"], ReviewStatus.approved.value)
+                    self.assertEqual(second_run[1]["reviewed_by"], reviewer)
+                    results_response = client.get("/reconciliation-results")
+                    self.assertEqual(results_response.status_code, 200)
                 persisted = database.get_match_result("TX-2")
-                self.assertEqual(persisted.reviewed_by, "Phase One Reviewer")
+                self.assertEqual(persisted.reviewed_by, reviewer)
                 self.assertEqual(persisted.match_outcome, MatchOutcome.potential_duplicate_payment)
                 self.assertTrue(persisted.evidence)
                 self.assertIn("potential_duplicate_payment", [item.type for item in persisted.anomalies])
@@ -318,7 +322,9 @@ class PersistenceAndIntegrationTests(unittest.TestCase):
                 patch.object(database, "TRANSACTIONS_CSV", transactions),
                 patch.object(database, "INVOICES_CSV", invoices),
             ):
-                response = TestClient(app).post("/run-reconciliation")
+                with TestClient(app) as client:
+                    login_test_user(client)
+                    response = client.post("/run-reconciliation")
             self.assertEqual(response.status_code, 422)
             self.assertEqual(response.json()["detail"]["transactions"][0]["row_number"], 2)
 

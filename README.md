@@ -13,6 +13,7 @@ operator view; FastAPI remains the source of reconciliation logic and data.
 - **Pydantic** for transaction, invoice, and match-result validation
 - **LangGraph** for classification, matching, and conditional routing
 - **SQLite** for durable reconciliation and review status
+- **Python standard library** for PBKDF2 password hashes and opaque sessions
 - **Streamlit** for the dashboard
 - **CSV** for the sample transaction and invoice inputs
 
@@ -34,7 +35,9 @@ flowchart LR
     REVIEW --> DB
     DB --> API
     API --> DASH[Streamlit dashboard]
-    DASH -->|Run and review actions| API
+    DASH -->|Bearer session| API
+    API --> AUTH[Authentication and role checks]
+    AUTH --> DB
 ```
 
 ## Requirements and setup
@@ -51,6 +54,22 @@ python generate_sample_data.py
 The CSV inputs are written to `data/transactions.csv` and `data/invoices.csv`.
 The API creates `data/finaudit.db` on startup. CSV inputs and SQLite databases
 are local data and are excluded from Git.
+
+Before the first API startup on a database without users, configure the
+bootstrap administrator in the API terminal. Choose a unique password of at
+least 12 characters. The variables create the first administrator only when
+the database has no users. Changing them later does not reset an account or
+create another one:
+
+```powershell
+$env:FINAUDIT_BOOTSTRAP_ADMIN_USERNAME = "admin"
+$env:FINAUDIT_BOOTSTRAP_ADMIN_PASSWORD = "replace-with-a-unique-password"
+```
+
+There is no default login. If both variables are unset on a database with no
+users, the API starts with protected routes but no way to sign in until a
+bootstrap admin is configured and the API is restarted. Do not commit real
+credentials or put them in the README.
 
 Optional matcher configuration uses these defaults:
 
@@ -73,6 +92,8 @@ each. In Terminal 1, start FastAPI:
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
+$env:FINAUDIT_BOOTSTRAP_ADMIN_USERNAME = "admin"
+$env:FINAUDIT_BOOTSTRAP_ADMIN_PASSWORD = "replace-with-a-unique-password"
 uvicorn app.main:app --reload
 ```
 
@@ -86,21 +107,27 @@ In Terminal 2, start Streamlit:
 streamlit run dashboard.py
 ```
 
-Open the local URL printed by Streamlit, usually `http://localhost:8501`. The
-sidebar defaults to the API at `http://127.0.0.1:8000`. On the Review queue page,
-enter a reviewer name before approving or rejecting a pending result.
+Open the local URL printed by Streamlit, usually `http://localhost:8501`, and
+sign in with the bootstrap administrator. Use **User management** to create
+reviewer and auditor accounts. Reviewers process the queue; auditors can read
+reconciliation results and review history without making changes.
 
 ## Demo workflow
 
-1. Select **Run reconciliation** on the Overview page.
-2. Review the summary metrics, match outcome, anomaly, and saved match table.
+1. As an administrator, create a reviewer and auditor account in **User
+   management**, then sign out.
+2. Sign in as the reviewer and select **Run reconciliation** on the Overview page.
+3. Review the summary metrics, match outcome, anomaly, and saved match table.
    A fresh run on the included CSVs currently produces 80 results: 25
    auto-approved and 55 awaiting review. Counts depend on the CSV contents and
    matcher settings.
-3. Open **Review queue**, enter a reviewer name, optionally add a reason, and approve or reject a record.
-4. The queue refreshes after the action. The result table shows the decision,
-   reviewer, and review status.
-5. Open **Review history** and select a transaction to inspect its review events.
+4. Open **Review queue**, optionally add a reason, and approve or reject a
+   record. The API records the authenticated username and user ID from the
+   session; a reviewer name is not accepted in the request body.
+5. Confirm the queue refreshes, then open **Review history** to inspect the
+   action, authenticated user, time, and reason.
+6. Sign in as the auditor and confirm results and history remain readable while
+   run and review actions are unavailable.
 
 The 2% amount tolerance is only one part of the decision. Vendor identity,
 dates, currencies, candidate ambiguity, duplicate invoice assignments, and
@@ -122,25 +149,53 @@ dashboard also includes match outcomes and anomaly evidence.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `GET` | `/health` | Health check |
-| `GET` | `/transactions` | Load transactions from CSV |
-| `GET` | `/invoices` | Load invoices from CSV |
-| `POST` | `/run-reconciliation` | Run the graph and persist results |
-| `GET` | `/reconciliation-results` | List all saved match results |
-| `GET` | `/transactions/flagged` | List records awaiting review |
-| `GET` | `/transactions/{transaction_id}/review-history` | List a result's human review events in chronological order |
-| `POST` | `/transactions/{transaction_id}/approve` | Approve a pending record |
-| `POST` | `/transactions/{transaction_id}/reject` | Reject a pending record |
+| `GET` | `/health` | Public health check |
+| `POST` | `/auth/login` | Exchange username and password for an 8-hour bearer session |
+| `GET` | `/auth/me` | Return the authenticated user's identity and role |
+| `POST` | `/auth/logout` | Revoke the current session |
+| `GET` | `/transactions` | Read transactions (reviewer, auditor) |
+| `GET` | `/invoices` | Read invoices (reviewer, auditor) |
+| `POST` | `/run-reconciliation` | Run the graph (reviewer) |
+| `GET` | `/reconciliation-results` | Read saved results (reviewer, auditor) |
+| `GET` | `/transactions/flagged` | Read the pending queue (reviewer, auditor) |
+| `GET` | `/transactions/{transaction_id}/review-history` | Read chronological history (reviewer, auditor) |
+| `POST` | `/transactions/{transaction_id}/approve` | Approve a pending record (reviewer only) |
+| `POST` | `/transactions/{transaction_id}/reject` | Reject a pending record (reviewer only) |
+| `GET` | `/admin/users` | List accounts (admin only) |
+| `POST` | `/admin/users` | Create an account and assign a role (admin only) |
+| `PATCH` | `/admin/users/{user_id}` | Change role or enable/disable an account (admin only) |
 
-Review requests accept JSON such as
-`{"reviewed_by":"Alex Reviewer","reason":"Invoice verified."}`. The reason
-is optional and limited to 1,000 characters. Missing results return `404`,
-already reviewed results return `409`, and invalid reviewer or reason values
-return `422`. Reconciliation reruns preserve human decisions.
+Protected requests use `Authorization: Bearer <access_token>`. Approve/reject
+requests accept an optional reason such as `{"reason":"Invoice verified."}`;
+they do not accept a reviewer name. Missing results return `404`, already
+reviewed results return `409`, unauthenticated requests return `401`, and
+insufficient roles return `403`. Invalid request data returns `422`.
+
+### Roles and sessions
+
+- **Admin** can create, list, and update user accounts and roles. Admin has no
+  reconciliation-data access or review permissions.
+- **Reviewer** can read data and approve or reject pending results. For this
+  MVP, the reviewer role deliberately also includes permission to run
+  reconciliation.
+- **Auditor** can read transactions, invoices, results, the pending queue, and
+  review history. Business-data write actions are denied; signing out is
+  available to every role.
+
+Passwords use salted PBKDF2-HMAC-SHA256 hashes with 600,000 rounds. Sessions
+are random opaque bearer tokens; only SHA-256 token digests are stored in
+SQLite. Logout revokes a token, sessions expire after eight hours, and each
+request reloads the user's active state and role so administrator changes take
+effect immediately. The first administrator is created only from the bootstrap
+environment variables described above. There is no public registration.
+
+This MVP has no MFA, account recovery, or login rate limiting. Use it locally;
+any remote deployment must use HTTPS and should add operational protections
+before handling real financial data.
 
 ## Review history and integrity
 
-SQLite schema version 2 adds a separate `review_events` table. Each human
+SQLite schema version 2 added a separate `review_events` table. Each human
 approval or rejection records an event ID, transaction ID, action, reviewer
 identifier, UTC timestamp, optional reason, and previous/new review and match
 statuses. The event insert and current result update run in one SQLite
@@ -154,10 +209,11 @@ audit history, not tamper-proof storage. Existing review decisions are retained
 by the additive migration, but historical events are not fabricated for
 decisions made before this feature existed.
 
-The dashboard's **Review history** page shows action, reviewer, UTC timestamp,
-reason when supplied, and the status transition for a selected transaction.
-Reviewer names are client-supplied identifiers, not authenticated identities;
-authentication and RBAC are not implemented.
+The dashboard's **Review history** page shows action, authenticated username
+and user ID, UTC timestamp, reason when supplied, and status transition. Events
+created before Phase 4 have no user ID and display as legacy/unavailable. Their
+old reviewer names were client-supplied values and are not retroactively
+verified.
 
 If a CSV contains malformed rows, duplicate identifiers, missing required
 values, invalid dates, non-numeric/non-finite amounts, or an unsupported
@@ -208,8 +264,10 @@ requires review regardless of score.
 
 The SQLite schema is upgraded additively on API startup using
 `PRAGMA user_version`; migration version 1 adds match outcome, evidence, and
-anomaly columns, and version 2 adds review-event history. Existing rows and
-review decisions remain intact. Existing CSV files stay backward-compatible.
+anomaly columns, version 2 adds review-event history, and version 3 adds users,
+hashed-token sessions, and authenticated reviewer IDs on new events. Existing
+rows, review decisions, and review events remain intact. Existing CSV files
+stay backward-compatible.
 Partial payments and split settlements are not supported in this phase.
 
 The LangGraph workflow validates input, classifies the transaction, matches an
@@ -235,5 +293,6 @@ negative amounts, ambiguous and duplicate invoices, potential duplicate
 payments, CSV row errors, one-to-one assignment, confidence scoring, additive
 migration, review persistence across reruns, fail-closed graph exceptions,
 ambiguous/duplicate routing, review-event migrations and persistence, atomic
-review rollback, review-state conflicts, dashboard history, and all original
-backend tests.
+review rollback, review-state conflicts, password hashing, login/logout,
+session expiry, role authorization, admin account management, authenticated
+audit attribution, dashboard login, dashboard history, and all original tests.
