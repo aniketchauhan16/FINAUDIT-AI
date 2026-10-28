@@ -35,7 +35,11 @@ def match_transaction(state: ReconciliationState) -> dict:
     )
 
     amount_difference = abs(best_invoice.amount_due - transaction.amount)
-    amount_diff_pct = amount_difference / best_invoice.amount_due
+    amount_diff_pct = (
+        amount_difference / best_invoice.amount_due
+        if best_invoice.amount_due != 0
+        else Decimal("0") if amount_difference == 0 else Decimal("Infinity")
+    )
 
     if amount_diff_pct <= AUTO_APPROVE_THRESHOLD:
         status = MatchStatus.auto_approved
