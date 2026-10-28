@@ -31,6 +31,18 @@ class ReviewStatus(str, Enum):
     rejected = "rejected"
 
 
+class UserRole(str, Enum):
+    admin = "admin"
+    reviewer = "reviewer"
+    auditor = "auditor"
+
+
+class AuthenticatedUser(BaseModel):
+    user_id: str
+    username: str
+    role: UserRole
+
+
 class MatchOutcome(str, Enum):
     exact_match = "exact_match"
     probable_match = "probable_match"
@@ -152,6 +164,7 @@ class ReviewEvent(BaseModel):
     transaction_id: str
     action: Literal["approved", "rejected"]
     reviewed_by: str
+    reviewer_user_id: Optional[str] = None
     occurred_at: datetime
     reason: Optional[str] = None
     previous_review_status: ReviewStatus
