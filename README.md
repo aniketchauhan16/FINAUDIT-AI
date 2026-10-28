@@ -291,7 +291,8 @@ The scenario inputs are in `evaluation/dataset/transactions.csv` and
 `invoices.csv`; expected outcomes are kept separately in `labels.csv`. Every
 label has a stable `scenario_id` and `transaction_id`. The runner rejects blank
 or duplicate IDs and requires an exact one-to-one match between transaction
-inputs and labels before running predictions. Expected labels are not inferred
+inputs and labels before running predictions. It also rejects blank or duplicate
+invoice IDs and labels that reference a nonexistent invoice. Expected labels are not inferred
 from predictions. The runner calls the existing reconciliation endpoint
 function and writes to a temporary SQLite database that is removed after the
 run. It calls the endpoint function directly with a reviewer principal;

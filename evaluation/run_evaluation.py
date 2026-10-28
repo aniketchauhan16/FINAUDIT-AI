@@ -134,6 +134,25 @@ def validate_label_coverage(
         )
 
 
+def validate_invoice_labels(invoices_path: Path, labels: dict[str, CaseLabel]) -> None:
+    """Reject duplicate/blank invoice IDs and labels pointing at absent invoices."""
+    rows = _read_csv(invoices_path)
+    invoice_ids = [(row.get("invoice_id") or "").strip() for row in rows]
+    if any(not invoice_id for invoice_id in invoice_ids):
+        raise ValueError("Evaluation invoices contain a blank invoice_id.")
+    if len(invoice_ids) != len(set(invoice_ids)):
+        raise ValueError("Evaluation invoices contain duplicate invoice IDs.")
+    known_ids = set(invoice_ids)
+    expected_ids = {
+        label.expected_invoice_id
+        for label in labels.values()
+        if label.expected_invoice_id
+    }
+    unknown = sorted(expected_ids - known_ids)
+    if unknown:
+        raise ValueError(f"Evaluation labels reference unknown invoice IDs: {unknown}")
+
+
 def _rate(numerator: int, denominator: int) -> dict[str, int | float | None]:
     return {
         "numerator": numerator,
@@ -296,6 +315,7 @@ def run_evaluation() -> dict:
     valid_transactions = DATASET_DIR / "transactions.csv"
     validate_label_coverage(valid_transactions, labels)
     invoices = DATASET_DIR / "invoices.csv"
+    validate_invoice_labels(invoices, labels)
     malformed_transactions = DATASET_DIR / "invalid_transactions.csv"
 
     with tempfile.TemporaryDirectory(prefix="finaudit-evaluation-") as temp:

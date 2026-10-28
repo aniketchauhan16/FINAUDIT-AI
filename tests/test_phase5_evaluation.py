@@ -14,6 +14,7 @@ from evaluation.run_evaluation import (
     run_evaluation,
     score_predictions,
     validate_label_coverage,
+    validate_invoice_labels,
 )
 from evaluation.review_labels import FIELDS as REVIEW_FIELDS, generate_review_worksheet
 from app.agents.validation import failure_match_result
@@ -154,6 +155,25 @@ class Phase5EvaluationTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "duplicate transaction IDs"):
                 validate_label_coverage(transactions_path, {"TX-1": label})
+
+    def test_invoice_ids_must_be_unique_and_ground_truth_must_reference_existing_ids(self):
+        label = CaseLabel(
+            scenario_id="invoice-case",
+            transaction_id="TX-1",
+            expected_invoice_id="INV-1",
+            expected_status="auto_approved",
+            expected_outcome="exact_match",
+            expected_anomalies=frozenset(),
+            scenario="Exact invoice reference",
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            invoices_path = Path(temp) / "invoices.csv"
+            invoices_path.write_text("invoice_id\nINV-1\nINV-1\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "duplicate invoice IDs"):
+                validate_invoice_labels(invoices_path, {"TX-1": label})
+            invoices_path.write_text("invoice_id\nINV-2\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "unknown invoice IDs"):
+                validate_invoice_labels(invoices_path, {"TX-1": label})
 
     def test_malformed_csv_duplicate_rejections_cannot_be_collapsed_by_identifier(self):
         duplicate_rejections = [
