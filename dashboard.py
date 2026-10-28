@@ -1,6 +1,7 @@
 """Small Streamlit client for the existing FinAudit AI HTTP API."""
 
 import json
+import os
 from collections import Counter
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
@@ -47,9 +48,11 @@ def result_rows(results: list[dict]) -> list[dict]:
             "Transaction": item["transaction_id"],
             "Invoice": item.get("invoice_id") or "—",
             "Match status": item["status"],
+            "Match outcome": item.get("match_outcome") or "legacy / not recorded",
             "Review status": item["review_status"],
             "Difference": item.get("amount_difference") or "—",
             "Confidence": f"{item['confidence_score']:.0%}",
+            "Anomalies": ", ".join(anomaly["type"] for anomaly in item.get("anomalies", [])) or "—",
             "Reviewer": item.get("reviewed_by") or "—",
             "Reason": item["reason"],
         }
@@ -63,7 +66,10 @@ st.caption("Local transaction and invoice reconciliation")
 
 with st.sidebar:
     st.header("Connection")
-    api_base = st.text_input("FastAPI base URL", value="http://127.0.0.1:8000").strip()
+    api_base = st.text_input(
+        "FastAPI base URL",
+        value=os.getenv("FINAUDIT_API_URL", "http://127.0.0.1:8000"),
+    ).strip()
     page = st.radio("Page", ("Overview", "Review queue"))
     reviewer = st.text_input("Reviewer name", value="")
     reviewer_name = reviewer.strip()
@@ -136,6 +142,13 @@ elif page == "Review queue":
                 st.write(f"**Invoice:** {item.get('invoice_id') or 'No matching invoice'}")
                 st.write(f"**Amount difference:** {item.get('amount_difference') or '—'}")
                 st.write(f"**Reason:** {item['reason']}")
+                for anomaly in item.get("anomalies", []):
+                    st.warning(
+                        f"{anomaly['type']} ({anomaly['severity']}): {anomaly['explanation']}"
+                    )
+                    if anomaly.get("evidence"):
+                        st.caption("Evidence: " + "; ".join(anomaly["evidence"]))
+                    st.caption("Recommended action: " + anomaly["recommended_action"])
                 approve_col, reject_col = st.columns(2)
                 for decision, column in (("approve", approve_col), ("reject", reject_col)):
                     if column.button(
