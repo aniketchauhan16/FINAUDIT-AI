@@ -1,13 +1,41 @@
-from fastapi import FastAPI
+from datetime import datetime, timezone
+
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field, field_validator
 from app.agents.graph import reconciliation_graph
-from app.models import Invoice, MatchResult, MatchStatus, Transaction
-from app.database import load_invoices, load_transactions
+from app.models import Invoice, MatchResult, MatchStatus, ReviewStatus, Transaction
+from app.database import (
+    get_match_result,
+    get_all_match_results,
+    get_pending_review_results,
+    init_db,
+    load_invoices,
+    load_transactions,
+    record_review,
+    ReviewConflictError,
+    ReviewNotFoundError,
+    save_match_results,
+)
 
 
 app = FastAPI(
     title="FinAudit AI",
     version="0.1.0",
 )
+
+init_db()
+
+
+class ReviewAction(BaseModel):
+    reviewed_by: str = Field(min_length=1, max_length=120)
+
+    @field_validator("reviewed_by")
+    @classmethod
+    def validate_reviewer(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("reviewed_by must not be blank")
+        return value
 
 
 @app.get("/health")
@@ -41,17 +69,83 @@ def run_reconciliation() -> list[MatchResult]:
             }
         )
 
-        results.append(final_state["match_result"])
+        match_result = apply_review_status(final_state["match_result"])
+        results.append(match_result)
 
-    return results
+    return save_match_results(results)
 
 
 @app.get("/transactions/flagged", response_model=list[MatchResult])
 def get_flagged_transactions() -> list[MatchResult]:
-    results = run_reconciliation()
+    return get_pending_review_results()
 
-    return [
-        result
-        for result in results
-        if result.status in {MatchStatus.flagged, MatchStatus.unmatched}
-    ]
+
+@app.get("/reconciliation-results", response_model=list[MatchResult])
+def get_reconciliation_results() -> list[MatchResult]:
+    return get_all_match_results()
+
+
+@app.post("/transactions/{transaction_id}/approve", response_model=MatchResult)
+def approve_transaction(transaction_id: str, action: ReviewAction) -> MatchResult:
+    return review_transaction(transaction_id, action, ReviewStatus.approved)
+
+
+@app.post("/transactions/{transaction_id}/reject", response_model=MatchResult)
+def reject_transaction(transaction_id: str, action: ReviewAction) -> MatchResult:
+    return review_transaction(transaction_id, action, ReviewStatus.rejected)
+
+
+def review_transaction(
+    transaction_id: str, action: ReviewAction, decision: ReviewStatus
+) -> MatchResult:
+    reviewer = action.reviewed_by.strip()
+    if not reviewer:
+        raise HTTPException(status_code=422, detail="reviewed_by must not be blank.")
+    try:
+        return record_review(
+            transaction_id,
+            decision,
+            reviewer,
+            datetime.now(timezone.utc).isoformat(),
+        )
+    except ReviewNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Reconciliation result not found.") from exc
+    except ReviewConflictError as exc:
+        raise HTTPException(
+            status_code=409, detail="Reconciliation result is not pending review."
+        ) from exc
+
+
+def apply_review_status(match_result: MatchResult) -> MatchResult:
+    existing_result = get_match_result(match_result.transaction_id)
+
+    if (
+        existing_result is not None
+        and existing_result.review_status in {ReviewStatus.approved, ReviewStatus.rejected}
+        and existing_result.reviewed_by != "system"
+    ):
+        return match_result.model_copy(
+            update={
+                "status": existing_result.status,
+                "review_status": existing_result.review_status,
+                "reviewed_at": existing_result.reviewed_at,
+                "reviewed_by": existing_result.reviewed_by,
+            }
+        )
+
+    if match_result.status in {MatchStatus.flagged, MatchStatus.unmatched}:
+        return match_result.model_copy(
+            update={
+                "review_status": ReviewStatus.pending_review,
+                "reviewed_at": None,
+                "reviewed_by": None,
+            }
+        )
+
+    return match_result.model_copy(
+        update={
+            "review_status": ReviewStatus.approved,
+            "reviewed_at": datetime.now(timezone.utc),
+            "reviewed_by": "system",
+        }
+    )
