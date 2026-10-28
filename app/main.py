@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException
@@ -9,8 +10,8 @@ from app.database import (
     get_all_match_results,
     get_pending_review_results,
     init_db,
-    load_invoices,
-    load_transactions,
+    load_invoices_report,
+    load_transactions_report,
     record_review,
     ReviewConflictError,
     ReviewNotFoundError,
@@ -18,12 +19,17 @@ from app.database import (
 )
 
 
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    init_db()
+    yield
+
+
 app = FastAPI(
     title="FinAudit AI",
     version="0.1.0",
+    lifespan=lifespan,
 )
-
-init_db()
 
 
 class ReviewAction(BaseModel):
@@ -45,20 +51,45 @@ def health_check() -> dict[str, str]:
 
 @app.get("/transactions", response_model=list[Transaction])
 def get_transactions() -> list[Transaction]:
-    return load_transactions()
+    report = load_transactions_report()
+    if report.rejected_rows:
+        raise HTTPException(
+            status_code=422,
+            detail={"message": "CSV validation failed.", "rejected_rows": report.error_details()},
+        )
+    return report.records
 
 
 @app.get("/invoices", response_model=list[Invoice])
 def get_invoices() -> list[Invoice]:
-    return load_invoices()
+    report = load_invoices_report()
+    if report.rejected_rows:
+        raise HTTPException(
+            status_code=422,
+            detail={"message": "CSV validation failed.", "rejected_rows": report.error_details()},
+        )
+    return report.records
 
 
 @app.post("/run-reconciliation", response_model=list[MatchResult])
 def run_reconciliation() -> list[MatchResult]:
-    invoices = load_invoices()
-    transactions = load_transactions()
+    transaction_report = load_transactions_report()
+    invoice_report = load_invoices_report()
+    if transaction_report.rejected_rows or invoice_report.rejected_rows:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "CSV validation failed; no reconciliation was run.",
+                "transactions": transaction_report.error_details(),
+                "invoices": invoice_report.error_details(),
+            },
+        )
+    invoices = invoice_report.records
+    transactions = transaction_report.records
 
     results: list[MatchResult] = []
+    assigned_invoice_ids: set[str] = set()
+    prior_transactions: list[Transaction] = []
 
     for transaction in transactions:
         final_state = reconciliation_graph.invoke(
@@ -66,11 +97,16 @@ def run_reconciliation() -> list[MatchResult]:
                 "transaction": transaction,
                 "invoices": invoices,
                 "match_result": None,
+                "assigned_invoice_ids": assigned_invoice_ids,
+                "prior_transactions": prior_transactions,
             }
         )
 
         match_result = apply_review_status(final_state["match_result"])
         results.append(match_result)
+        if match_result.invoice_id:
+            assigned_invoice_ids.add(match_result.invoice_id)
+        prior_transactions.append(transaction)
 
     return save_match_results(results)
 
